@@ -1,14 +1,15 @@
 /*
     Forest Manager - 3ds Max 2020 Bridge
-    Stage 1: PING and GET_SELECTION
+    Stage 2: PING, selection inspection, Forest Pack detection,
+             and verified Forest creation from one closed spline.
 
-    Protocol:
-      TCP localhost:49491
-      One ASCII command per connection, newline terminated.
-      One UTF-8 JSON response per connection, newline terminated.
+    Target:
+      3ds Max 2020
+      Forest Pack 9.4.0
 
-    The listener is polled by a MAXScript timer so all scene inspection
-    remains on the 3ds Max main thread.
+    Security:
+      TCP bind is localhost only.
+      Stage 2 scene mutation is limited to CREATE_FOREST_FROM_SELECTION.
 */
 
 global ForestManagerBridge
@@ -32,15 +33,8 @@ struct ForestManagerBridgeState
         s
     ),
 
-    fn jsonString value =
-    (
-        "\"" + (jsonEscape value) + "\""
-    ),
-
-    fn boolJson value =
-    (
-        if value then "true" else "false"
-    ),
+    fn jsonString value = ("\"" + (jsonEscape value) + "\""),
+    fn boolJson value = (if value then "true" else "false"),
 
     fn makeError command message =
     (
@@ -54,17 +48,18 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.1.0\"}"
+        ",\"bridge_version\":\"0.2.0\"}"
     ),
 
-    fn getSelectionJson =
+    fn getSingleSelection =
     (
-        if selection.count != 1 then
-        (
+        if selection.count != 1 do
             throw "Select exactly one object in 3ds Max."
-        )
+        selection[1]
+    ),
 
-        local obj = selection[1]
+    fn getSelectionData obj =
+    (
         local objName = obj.name as string
         local objClass = (classOf obj) as string
         local objSuperClass = (superClassOf obj) as string
@@ -97,13 +92,209 @@ struct ForestManagerBridgeState
             )
         )
 
-        "{\"name\":" + (jsonString objName) +
-        ",\"class\":" + (jsonString objClass) +
-        ",\"super_class\":" + (jsonString objSuperClass) +
-        ",\"is_shape\":" + (boolJson isShape) +
-        ",\"is_spline\":" + (boolJson isSpline) +
-        ",\"spline_count\":" + (splineCount as string) +
-        ",\"all_closed\":" + (boolJson allClosed) + "}"
+        #(
+            objName,
+            objClass,
+            objSuperClass,
+            isShape,
+            isSpline,
+            splineCount,
+            allClosed
+        )
+    ),
+
+    fn getSelectionJson =
+    (
+        local obj = getSingleSelection()
+        local d = getSelectionData obj
+
+        "{\"name\":" + (jsonString d[1]) +
+        ",\"class\":" + (jsonString d[2]) +
+        ",\"super_class\":" + (jsonString d[3]) +
+        ",\"is_shape\":" + (boolJson d[4]) +
+        ",\"is_spline\":" + (boolJson d[5]) +
+        ",\"spline_count\":" + (d[6] as string) +
+        ",\"all_closed\":" + (boolJson d[7]) + "}"
+    ),
+
+    fn forestPackAvailable =
+    (
+        local available = false
+        try
+        (
+            available = (::Forest_Pro != undefined)
+        )
+        catch
+        (
+            available = false
+        )
+        available
+    ),
+
+    fn getForestPackInfoJson =
+    (
+        local available = forestPackAvailable()
+        local className = ""
+        local forestCount = 0
+
+        if available then
+        (
+            className = "::Forest_Pro"
+            for obj in objects do
+            (
+                try
+                (
+                    if isKindOf obj ::Forest_Pro do forestCount += 1
+                )
+                catch()
+            )
+        )
+
+        "{\"available\":" + (boolJson available) +
+        ",\"class_name\":" + (jsonString className) +
+        ",\"forest_count\":" + (forestCount as string) + "}"
+    ),
+
+    fn requireArrayProperty forestNode propName =
+    (
+        if not (isProperty forestNode propName) do
+            throw ("Forest Pack property missing: " + (propName as string))
+        local value = getProperty forestNode propName
+        if classOf value != ArrayParameter do
+            throw ("Forest Pack property is not an ArrayParameter: " + (propName as string))
+        value
+    ),
+
+    fn resizeAreaArrays forestNode newCount =
+    (
+        local props = #(
+            #aridlist,
+            #pf_aractivelist,
+            #arnamelist,
+            #arnodelist,
+            #arnodenamelist,
+            #artypelist,
+            #arincexclist,
+            #arresollist,
+            #arslicelist,
+            #arslicetoplist,
+            #arwidthlist,
+            #armaplist,
+            #arscalelist,
+            #arthresholdlist,
+            #arselspeclist,
+            #arspeclist,
+            #arpaintlist,
+            #arflafdenslist,
+            #arflafscalist,
+            #arflinvlist,
+            #arboundchecklist,
+            #arshapelist,
+            #arobscalelist,
+            #arsurfidlist,
+            #arzoffset
+        )
+
+        for propName in props do
+        (
+            local arr = requireArrayProperty forestNode propName
+            arr.count = newCount
+        )
+        true
+    ),
+
+    fn makeForestName =
+    (
+        local index = 1
+        local candidate = ""
+        while true do
+        (
+            candidate = "FM_Forest_" + (formattedPrint index format:"03d")
+            if getNodeByName candidate == undefined do return candidate
+            index += 1
+        )
+    ),
+
+    fn addSplineIncludeArea forestNode splineNode =
+    (
+        local currentCount = forestNode.aridlist.count
+        local index = currentCount + 1
+
+        resizeAreaArrays forestNode index
+
+        forestNode.aridlist[index] = index
+        forestNode.pf_aractivelist[index] = true
+        forestNode.arnamelist[index] = splineNode.name
+        forestNode.arnodelist[index] = splineNode
+        forestNode.arnodenamelist[index] = splineNode.name
+
+        -- 0 = spline area; 0 = Include. These are the normal values used by
+        -- Forest Pack's array-backed Area list.
+        forestNode.artypelist[index] = 0
+        forestNode.arincexclist[index] = 0
+        forestNode.arobscalelist[index] = 100
+
+        index
+    ),
+
+    fn verifySplineArea forestNode splineNode areaIndex =
+    (
+        if forestNode == undefined then return false
+        if splineNode == undefined then return false
+        if areaIndex < 1 then return false
+        if forestNode.aridlist.count < areaIndex then return false
+        if forestNode.arnodelist[areaIndex] != splineNode then return false
+        if forestNode.arincexclist[areaIndex] != 0 then return false
+        true
+    ),
+
+    fn createForestFromSelectionJson =
+    (
+        if not (forestPackAvailable()) do
+            throw "Forest Pack Pro class ::Forest_Pro is not available."
+
+        local splineNode = getSingleSelection()
+        local selectionData = getSelectionData splineNode
+
+        if not selectionData[5] do
+            throw "Selected object is not a spline."
+        if not selectionData[7] do
+            throw "Selected spline must be closed for Stage 2."
+
+        local forestNode = undefined
+        local areaIndex = 0
+
+        try
+        (
+            forestNode = ::Forest_Pro()
+            forestNode.name = makeForestName()
+            areaIndex = addSplineIncludeArea forestNode splineNode
+
+            if not (verifySplineArea forestNode splineNode areaIndex) do
+                throw "Forest spline-area verification failed after creation."
+
+            completeRedraw()
+
+            "{\"forest_name\":" + (jsonString forestNode.name) +
+            ",\"forest_class\":" + (jsonString ((classOf forestNode) as string)) +
+            ",\"area_count\":" + (forestNode.aridlist.count as string) +
+            ",\"area_index\":" + (areaIndex as string) +
+            ",\"area_name\":" + (jsonString forestNode.arnamelist[areaIndex]) +
+            ",\"area_node\":" + (jsonString splineNode.name) +
+            ",\"include\":true" +
+            ",\"verified\":true}"
+        )
+        catch
+        (
+            local message = getCurrentException()
+            try
+            (
+                if forestNode != undefined do delete forestNode
+            )
+            catch()
+            format "Forest Manager Stage 2 creation error: %\n" message
+            throw
+        )
     ),
 
     fn handleCommand rawCommand =
@@ -117,6 +308,7 @@ struct ForestManagerBridgeState
                 "{\"ok\":true,\"command\":\"PING\",\"data\":" +
                 getMaxVersionJson() + ",\"error\":\"\"}"
             )
+
             "GET_SELECTION":
             (
                 try
@@ -129,6 +321,33 @@ struct ForestManagerBridgeState
                     makeError "GET_SELECTION" (getCurrentException())
                 )
             )
+
+            "GET_FORESTPACK_INFO":
+            (
+                try
+                (
+                    "{\"ok\":true,\"command\":\"GET_FORESTPACK_INFO\",\"data\":" +
+                    getForestPackInfoJson() + ",\"error\":\"\"}"
+                )
+                catch
+                (
+                    makeError "GET_FORESTPACK_INFO" (getCurrentException())
+                )
+            )
+
+            "CREATE_FOREST_FROM_SELECTION":
+            (
+                try
+                (
+                    "{\"ok\":true,\"command\":\"CREATE_FOREST_FROM_SELECTION\",\"data\":" +
+                    createForestFromSelectionJson() + ",\"error\":\"\"}"
+                )
+                catch
+                (
+                    makeError "CREATE_FOREST_FROM_SELECTION" (getCurrentException())
+                )
+            )
+
             default:
             (
                 makeError command "Unknown command."

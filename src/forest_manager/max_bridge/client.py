@@ -36,7 +36,9 @@ class MaxBridgeClient:
             ) from exc
 
         if not raw:
-            raise MaxBridgeConnectionError("3ds Max bridge closed the connection without a response.")
+            raise MaxBridgeConnectionError(
+                "3ds Max bridge closed the connection without a response."
+            )
 
         try:
             line = raw.decode("utf-8").rstrip("\r\n")
@@ -50,3 +52,9 @@ class MaxBridgeClient:
 
     def get_selection(self) -> BridgeResponse:
         return self._request("GET_SELECTION")
+
+    def get_forestpack_info(self) -> BridgeResponse:
+        return self._request("GET_FORESTPACK_INFO")
+
+    def create_forest_from_selection(self) -> BridgeResponse:
+        return self._request("CREATE_FOREST_FROM_SELECTION")
