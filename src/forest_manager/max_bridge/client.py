@@ -58,3 +58,30 @@ class MaxBridgeClient:
 
     def create_forest_from_selection(self) -> BridgeResponse:
         return self._request("CREATE_FOREST_FROM_SELECTION")
+
+    def get_forest_geometry_contract(self) -> BridgeResponse:
+        return self._request("GET_FOREST_GEOMETRY_CONTRACT")
+
+    def get_forest_geometry_contract_details(self) -> BridgeResponse:
+        return self._request("GET_FOREST_GEOMETRY_CONTRACT_DETAILS")
+
+    def add_selected_geometry_to_forest(self) -> BridgeResponse:
+        return self._request("ADD_SELECTED_GEOMETRY_TO_FOREST")
+
+    def get_forest_distribution_contract(self) -> BridgeResponse:
+        return self._request("GET_FOREST_DISTRIBUTION_CONTRACT")
+
+    def get_forest_distribution_units(self) -> BridgeResponse:
+        return self._request("GET_FOREST_DISTRIBUTION_UNITS")
+
+    def configure_adaptive_distribution(self) -> BridgeResponse:
+        return self._request("CONFIGURE_ADAPTIVE_DISTRIBUTION")
+
+    def normalize_forest_build_state(self) -> BridgeResponse:
+        return self._request("NORMALIZE_FOREST_BUILD_STATE")
+
+    def get_forest_full_runtime_contract(self) -> BridgeResponse:
+        return self._request("GET_FOREST_FULL_RUNTIME_CONTRACT")
+
+    def normalize_geometry_item(self) -> BridgeResponse:
+        return self._request("NORMALIZE_GEOMETRY_ITEM")

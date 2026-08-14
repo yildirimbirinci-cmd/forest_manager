@@ -87,3 +87,216 @@ def test_create_forest_round_trip():
     )
     assert result.ok is True
     assert result.data["verified"] is True
+
+
+def test_geometry_contract_round_trip():
+    result = _round_trip(
+        "GET_FOREST_GEOMETRY_CONTRACT",
+        {
+            "ok": True,
+            "command": "GET_FOREST_GEOMETRY_CONTRACT",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "property_count": 400,
+                "geometry_candidates": ["namelist", "matlist"],
+            },
+            "error": "",
+        },
+        "get_forest_geometry_contract",
+    )
+    assert result.ok is True
+    assert "namelist" in result.data["geometry_candidates"]
+
+
+def test_geometry_contract_details_round_trip():
+    result = _round_trip(
+        "GET_FOREST_GEOMETRY_CONTRACT_DETAILS",
+        {
+            "ok": True,
+            "command": "GET_FOREST_GEOMETRY_CONTRACT_DETAILS",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "properties": [
+                    {
+                        "name": "geomlist",
+                        "exists": True,
+                        "value_class": "ArrayParameter",
+                        "count": 1,
+                        "first_class": "undefined",
+                        "first_value": "undefined",
+                    }
+                ],
+            },
+            "error": "",
+        },
+        "get_forest_geometry_contract_details",
+    )
+    assert result.ok is True
+    assert result.data["properties"][0]["name"] == "geomlist"
+
+
+def test_add_selected_geometry_round_trip():
+    result = _round_trip(
+        "ADD_SELECTED_GEOMETRY_TO_FOREST",
+        {
+            "ok": True,
+            "command": "ADD_SELECTED_GEOMETRY_TO_FOREST",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "source_name": "Box001",
+                "geometry_count": 1,
+                "geometry_index": 1,
+                "probability": 100.0,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "add_selected_geometry_to_forest",
+    )
+    assert result.ok is True
+    assert result.data["source_name"] == "Box001"
+    assert result.data["geometry_count"] == 1
+    assert result.data["verified"] is True
+
+
+def test_distribution_contract_round_trip():
+    result = _round_trip(
+        "GET_FOREST_DISTRIBUTION_CONTRACT",
+        {
+            "ok": True,
+            "command": "GET_FOREST_DISTRIBUTION_CONTRACT",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "property_count": 341,
+                "properties": [
+                    {"name": "density", "value_class": "Float", "value": "100.0"}
+                ],
+            },
+            "error": "",
+        },
+        "get_forest_distribution_contract",
+    )
+    assert result.ok is True
+    assert result.data["forest_name"] == "FM_Forest_001"
+
+
+def test_distribution_units_round_trip():
+    result = _round_trip(
+        "GET_FOREST_DISTRIBUTION_UNITS",
+        {
+            "ok": True,
+            "command": "GET_FOREST_DISTRIBUTION_UNITS",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "properties": [
+                    {"name": "units", "value_class": "Float", "value": "1000.0"}
+                ],
+            },
+            "error": "",
+        },
+        "get_forest_distribution_units",
+    )
+    assert result.ok is True
+    assert result.data["forest_name"] == "FM_Forest_001"
+
+
+def test_adaptive_distribution_round_trip():
+    result = _round_trip(
+        "CONFIGURE_ADAPTIVE_DISTRIBUTION",
+        {
+            "ok": True,
+            "command": "CONFIGURE_ADAPTIVE_DISTRIBUTION",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "area_node": "Line001",
+                "area_size_x": 500.0,
+                "area_size_y": 400.0,
+                "previous_units_x": 10000.0,
+                "previous_units_y": 10000.0,
+                "units_x": 20.0,
+                "units_y": 20.0,
+                "distmode": 0,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "configure_adaptive_distribution",
+    )
+    assert result.ok is True
+    assert result.data["previous_units_x"] == 10000.0
+    assert result.data["units_x"] == 20.0
+    assert result.data["verified"] is True
+
+
+def test_normalize_forest_build_state_round_trip():
+    result = _round_trip(
+        "NORMALIZE_FOREST_BUILD_STATE",
+        {
+            "ok": True,
+            "command": "NORMALIZE_FOREST_BUILD_STATE",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "previous_disabled": True,
+                "disabled": False,
+                "manualupdate": False,
+                "units_x": 25.0,
+                "units_y": 25.0,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "normalize_forest_build_state",
+    )
+    assert result.ok is True
+    assert result.data["disabled"] is False
+    assert result.data["verified"] is True
+
+
+def test_full_runtime_contract_round_trip():
+    result = _round_trip(
+        "GET_FOREST_FULL_RUNTIME_CONTRACT",
+        {
+            "ok": True,
+            "command": "GET_FOREST_FULL_RUNTIME_CONTRACT",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "array_properties": [{"name": "cobjlist", "count": 1, "first_class": "Box", "first_value": "$Box:Box001"}],
+                "state_properties": [{"name": "disabled", "value_class": "BooleanClass", "value": "false"}],
+                "geometry_count": 1,
+                "source_name": "Box001",
+            },
+            "error": "",
+        },
+        "get_forest_full_runtime_contract",
+    )
+    assert result.ok is True
+    assert result.data["geometry_count"] == 1
+    assert result.data["source_name"] == "Box001"
+
+
+def test_normalize_geometry_item_round_trip():
+    result = _round_trip(
+        "NORMALIZE_GEOMETRY_ITEM",
+        {
+            "ok": True,
+            "command": "NORMALIZE_GEOMETRY_ITEM",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "source_name": "Box001",
+                "geometry_mode": 2,
+                "temp_name": "Box001",
+                "width": 50.0,
+                "depth": 50.0,
+                "height": 50.0,
+                "generated_items_before": 0,
+                "generated_items_after": 25,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "normalize_geometry_item",
+    )
+    assert result.ok is True
+    assert result.data["geometry_mode"] == 2
+    assert result.data["temp_name"] == "Box001"
+    assert result.data["verified"] is True
