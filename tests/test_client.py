@@ -300,3 +300,146 @@ def test_normalize_geometry_item_round_trip():
     assert result.data["geometry_mode"] == 2
     assert result.data["temp_name"] == "Box001"
     assert result.data["verified"] is True
+
+
+def test_merge_t2_asset_preserves_path_case_and_round_trips():
+    import base64
+
+    asset_path = r"C:\T2 Library\Acer Campestre\Acer campestre.max"
+    encoded = base64.b64encode(asset_path.encode("utf-8")).decode("ascii")
+    expected = "MERGE_T2_ASSET|" + encoded
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    response = {
+        "ok": True,
+        "command": "MERGE_T2_ASSET",
+        "data": {
+            "asset_path": asset_path,
+            "forest_name": "FM_Forest_001",
+            "merged_node_count": 3,
+            "source_name": "Acer_Campestre",
+            "geometry_count": 1,
+            "geometry_mode": 2,
+            "generated_items": 120,
+            "verified": True,
+        },
+        "error": "",
+    }
+
+    thread = threading.Thread(
+        target=_serve_once,
+        args=(listener, expected, response),
+        daemon=True,
+    )
+    thread.start()
+
+    client = MaxBridgeClient(
+        MaxBridgeConfig(host="127.0.0.1", port=port, timeout_seconds=1.0)
+    )
+    result = client.merge_t2_asset_and_bind(asset_path)
+
+    thread.join(timeout=2.0)
+    listener.close()
+
+    assert result.ok is True
+    assert result.data["asset_path"] == asset_path
+    assert result.data["geometry_mode"] == 2
+    assert result.data["verified"] is True
+
+
+def test_asset_aware_density_round_trip():
+    result = _round_trip(
+        "CONFIGURE_ASSET_AWARE_DENSITY",
+        {
+            "ok": True,
+            "command": "CONFIGURE_ASSET_AWARE_DENSITY",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "source_name": "Acer campestre (Field maple)",
+                "source_class": "CProxy",
+                "source_footprint_x": 542.135,
+                "source_footprint_y": 564.932,
+                "area_size_x": 1000.0,
+                "area_size_y": 900.0,
+                "previous_units_x": 21.6697,
+                "previous_units_y": 21.6697,
+                "units_x": 569.24175,
+                "units_y": 593.1786,
+                "generated_items_before": 40893,
+                "generated_items_after": 24,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "configure_asset_aware_density",
+    )
+    assert result.ok is True
+    assert result.data["source_class"] == "CProxy"
+    assert result.data["generated_items_after"] == 24
+    assert result.data["verified"] is True
+
+
+def test_target_item_density_round_trip():
+    result = _round_trip(
+        "CONFIGURE_TARGET_ITEM_DENSITY",
+        {
+            "ok": True,
+            "command": "CONFIGURE_TARGET_ITEM_DENSITY",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "area_node": "Line001",
+                "area_size_x": 10000.0,
+                "area_size_y": 9000.0,
+                "bbox_area": 90000000.0,
+                "target_items": 45000,
+                "previous_units_x": 569.0,
+                "previous_units_y": 593.0,
+                "pass1_items": 35343,
+                "pass2_items": 44920,
+                "units_x": 39.7,
+                "units_y": 44.72136,
+                "generated_items_before": 1000,
+                "generated_items_after": 45000,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "configure_target_item_density",
+    )
+    assert result.ok is True
+    assert result.data["target_items"] == 45000
+    assert result.data["generated_items_after"] == 45000
+    assert result.data["verified"] is True
+
+
+def test_fixed_distribution_units_round_trip():
+    result = _round_trip(
+        "CONFIGURE_FIXED_DISTRIBUTION_UNITS",
+        {
+            "ok": True,
+            "command": "CONFIGURE_FIXED_DISTRIBUTION_UNITS",
+            "data": {
+                "forest_name": "FM_Forest_001",
+                "target_units": 45000.0,
+                "previous_units_x": 45000.0,
+                "previous_units_y": 4333.948,
+                "units_x": 45000.0,
+                "units_y": 45000.0,
+                "maxdensity": 10,
+                "generated_items_before": 24,
+                "generated_items_after": 1,
+                "verified": True,
+            },
+            "error": "",
+        },
+        "configure_fixed_distribution_units",
+    )
+    assert result.ok is True
+    assert result.data["units_x"] == 45000.0
+    assert result.data["units_y"] == 45000.0
+    assert result.data["maxdensity"] == 10
+    assert result.data["verified"] is True

@@ -1,0 +1,17 @@
+{
+  "name": "Stage 4H three-tree composition",
+  "items": [
+    {
+      "query": "Acer campestre (Field maple)",
+      "weight": 40
+    },
+    {
+      "query": "Alnus glutinosa (Black alder)",
+      "weight": 35
+    },
+    {
+      "query": "Alnus x spaethii 'Spaeth' (Spaeth alder)",
+      "weight": 25
+    }
+  ]
+}

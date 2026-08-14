@@ -1,0 +1,25 @@
+{
+  "style": "naturalistic mixed woodland",
+  "density": "medium",
+  "diversity": "medium",
+  "canopy_bias": "mixed medium and tall canopy",
+  "composition_notes": [
+    "Use a dominant primary tree with two supporting species.",
+    "Keep the distribution non-uniform and visually mixed."
+  ],
+  "plant_candidates": [
+    {
+      "query": "Acer campestre (Field maple)",
+      "weight": 40
+    },
+    {
+      "query": "Alnus glutinosa (Black alder)",
+      "weight": 35
+    },
+    {
+      "query": "Alnus x spaethii 'Spaeth' (Spaeth alder)",
+      "weight": 25
+    }
+  ],
+  "confidence": 0.9
+}
