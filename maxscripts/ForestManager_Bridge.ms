@@ -50,8 +50,8 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.9.51\"" +
-        ",\"bridge_build_id\":\"stage5d29-point-cloud-default-20260815a\"}"
+        ",\"bridge_version\":\"0.9.66\"" +
+        ",\"bridge_build_id\":\"stage5d41-empty-string-array-write-20260815a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -5955,6 +5955,1313 @@ struct ForestManagerBridgeState
         true
     ),
 
+    fn findForestControlNode nodeName =
+    (
+        local node = getNodeByName nodeName
+        if node == undefined do
+            throw ("Forest control target was not found: " + nodeName)
+
+        local isForest = false
+        try (isForest = isKindOf node ::Forest_Pro) catch()
+        if not isForest do
+            throw ("Forest control target is not Forest_Pro: " + nodeName)
+        node
+    ),
+
+    fn forestControlClassName value =
+    (
+        if value == undefined then "UndefinedClass" else ((classOf value) as string)
+    ),
+
+    fn forestControlScalarWritable valueClass =
+    (
+        valueClass == "BooleanClass" or
+        valueClass == "Integer" or
+        valueClass == "Float" or
+        valueClass == "String"
+    ),
+
+    fn forestControlWriteMode valueClass =
+    (
+        if forestControlScalarWritable valueClass then "scalar"
+        else if valueClass == "Color" then "color"
+        else if valueClass == "Time" then "time"
+        else if valueClass == "Bitmaptexture" then "bitmap_reference"
+        else "read_only"
+    ),
+
+    fn forestControlArrayElementJson value =
+    (
+        if value == undefined do
+            return "{\"value_class\":\"UndefinedClass\",\"preview\":\"undefined\"}"
+
+        local valueClass = forestControlClassName value
+        "{\"value_class\":" + (jsonString valueClass) +
+        ",\"preview\":" + (jsonString (value as string)) + "}"
+    ),
+
+    fn forestControlArrayMetadataJson value =
+    (
+        if value == undefined do
+            return "{\"count\":0,\"element_classes\":[],\"elements\":[]}"
+
+        local countValue = 0
+        try (countValue = value.count) catch (countValue = 0)
+
+        local classes = #()
+        local maxPreview = if countValue < 16 then countValue else 16
+        local jsonElements = "["
+
+        for i = 1 to countValue do
+        (
+            local item = undefined
+            try (item = value[i]) catch (item = undefined)
+            local itemClass = forestControlClassName item
+            if (findItem classes itemClass) == 0 do append classes itemClass
+
+            if i <= maxPreview do
+            (
+                if i > 1 do jsonElements += ","
+                jsonElements += forestControlArrayElementJson item
+            )
+        )
+        jsonElements += "]"
+
+        local jsonClasses = "["
+        for i = 1 to classes.count do
+        (
+            if i > 1 do jsonClasses += ","
+            jsonClasses += jsonString classes[i]
+        )
+        jsonClasses += "]"
+
+        "{\"count\":" + (countValue as string) +
+        ",\"preview_count\":" + (maxPreview as string) +
+        ",\"element_classes\":" + jsonClasses +
+        ",\"elements\":" + jsonElements + "}"
+    ),
+
+    fn forestControlTypedValueJson value =
+    (
+        if value == undefined do return "null"
+
+        local valueClass = (classOf value) as string
+        case valueClass of
+        (
+            "BooleanClass": (boolJson value)
+            "Integer": (value as string)
+            "Float": (value as string)
+            "String": (jsonString value)
+            "Color":
+            (
+                "{\"r\":" + (value.r as string) +
+                ",\"g\":" + (value.g as string) +
+                ",\"b\":" + (value.b as string) + "}"
+            )
+            "Time":
+            (
+                "{\"native\":" + (jsonString (value as string)) + "}"
+            )
+            "Bitmaptexture":
+            (
+                local mapName = ""
+                local fileName = ""
+                try (mapName = value.name) catch()
+                try (fileName = value.filename) catch()
+                "{\"name\":" + (jsonString mapName) +
+                ",\"filename\":" + (jsonString fileName) + "}"
+            )
+            default: (jsonString (value as string))
+        )
+    ),
+
+    fn forestControlPropertyJson node propToken =
+    (
+        local value = getProperty node propToken
+        local valueClass = forestControlClassName value
+        local writableScalar = forestControlScalarWritable valueClass
+        local writeMode = forestControlWriteMode valueClass
+        local arrayMetadata = "null"
+        if valueClass == "ArrayParameter" do
+            arrayMetadata = forestControlArrayMetadataJson value
+
+        "{\"name\":" + (jsonString (propToken as string)) +
+        ",\"value_class\":" + (jsonString valueClass) +
+        ",\"write_mode\":" + (jsonString writeMode) +
+        ",\"writable_scalar\":" + (boolJson writableScalar) +
+        ",\"value\":" + (forestControlTypedValueJson value) +
+        ",\"array_metadata\":" + arrayMetadata +
+        ",\"preview\":" + (jsonString (value as string)) + "}"
+    ),
+
+    fn forestControlListJson =
+    (
+        if not (forestPackAvailable()) do
+            throw "Forest Pack Pro class ::Forest_Pro is not available."
+
+        local names = #()
+        for obj in objects do
+        (
+            local isForest = false
+            try (isForest = isKindOf obj ::Forest_Pro) catch()
+            if isForest do append names obj.name
+        )
+
+        local json = "{\"forest_count\":" + (names.count as string) + ",\"forest_names\":["
+        for i = 1 to names.count do
+        (
+            if i > 1 do json += ","
+            json += jsonString names[i]
+        )
+        json += "],\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
+    fn forestControlInventoryJson nodeName =
+    (
+        local node = findForestControlNode nodeName
+        local props = getPropNames node
+        local json = "{\"forest_name\":" + (jsonString node.name) +
+                     ",\"property_count\":" + (props.count as string) +
+                     ",\"properties\":["
+
+        for i = 1 to props.count do
+        (
+            if i > 1 do json += ","
+            json += forestControlPropertyJson node props[i]
+        )
+
+        json += "],\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
+    fn forestControlGetJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property\":" + forestControlPropertyJson node propToken +
+        ",\"read_only\":true,\"verified\":true}"
+    ),
+
+    fn forestControlParseScalar encodedType encodedValue =
+    (
+        local valueType = toUpper encodedType
+        local rawValue = ""
+        if valueType == "STRING" and encodedValue == "__FM_EMPTY_STRING__" then
+            rawValue = ""
+        else
+            rawValue = decodeBase64Utf8 encodedValue
+
+        case valueType of
+        (
+            "BOOL":
+            (
+                local normalized = toLower rawValue
+                if normalized == "true" then true
+                else if normalized == "false" then false
+                else throw "BOOL value must be true or false."
+            )
+            "INT": (rawValue as integer)
+            "FLOAT": (rawValue as float)
+            "STRING": rawValue
+            default: (throw ("Unsupported Forest scalar write type: " + encodedType))
+        )
+    ),
+
+    fn forestControlParseColor encodedValue =
+    (
+        local rawValue = decodeBase64Utf8 encodedValue
+        local parts = filterString rawValue ","
+        if parts.count != 3 do
+            throw "COLOR value must contain exactly r,g,b."
+
+        local r = parts[1] as float
+        local g = parts[2] as float
+        local b = parts[3] as float
+
+        if r < 0 or r > 255 or g < 0 or g > 255 or b < 0 or b > 255 do
+            throw "COLOR components must be in the 0..255 range."
+
+        color r g b
+    ),
+
+    fn forestControlSetJson nodeName propName valueType encodedValue =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local beforeValue = getProperty node propToken
+        local beforeClass = forestControlClassName beforeValue
+        local writeMode = forestControlWriteMode beforeClass
+        if writeMode == "read_only" do
+            throw ("Forest property does not have a safe write adapter: " + propName + " (" + beforeClass + ")")
+
+        local newValue = undefined
+        if beforeClass == "Color" then
+        (
+            if toUpper valueType != "COLOR" do
+                throw ("Forest Color property requires COLOR write type: " + propName)
+            newValue = forestControlParseColor encodedValue
+        )
+        else
+        (
+            newValue = forestControlParseScalar valueType encodedValue
+        )
+
+        setProperty node propToken newValue
+
+        local afterValue = getProperty node propToken
+        local afterClass = forestControlClassName afterValue
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+        try (redrawViews()) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"before_class\":" + (jsonString beforeClass) +
+        ",\"before_value\":" + (forestControlTypedValueJson beforeValue) +
+        ",\"after_class\":" + (jsonString afterClass) +
+        ",\"after_value\":" + (forestControlTypedValueJson afterValue) +
+        ",\"write_type\":" + (jsonString valueType) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlArrayElementWritableClass valueClass =
+    (
+        valueClass == "BooleanClass" or
+        valueClass == "Integer" or
+        valueClass == "Float" or
+        valueClass == "String"
+    ),
+
+    fn forestControlArrayGetJson nodeName propName elementIndex =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest array property does not exist: " + propName)
+
+        local arr = getProperty node propToken
+        local arrClass = forestControlClassName arr
+        if arrClass != "ArrayParameter" do
+            throw ("Forest property is not ArrayParameter: " + propName + " (" + arrClass + ")")
+
+        local countValue = arr.count
+        if elementIndex < 1 or elementIndex > countValue do
+            throw ("Forest array index out of range: " + (elementIndex as string))
+
+        local value = arr[elementIndex]
+        local valueClass = forestControlClassName value
+        local writable = forestControlArrayElementWritableClass valueClass
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"index\":" + (elementIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"value_class\":" + (jsonString valueClass) +
+        ",\"writable_primitive\":" + (boolJson writable) +
+        ",\"value\":" + (forestControlTypedValueJson value) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlArraySetJson nodeName propName elementIndex valueType encodedValue =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest array property does not exist: " + propName)
+
+        local arr = getProperty node propToken
+        local arrClass = forestControlClassName arr
+        if arrClass != "ArrayParameter" do
+            throw ("Forest property is not ArrayParameter: " + propName + " (" + arrClass + ")")
+
+        local countValue = arr.count
+        if elementIndex < 1 or elementIndex > countValue do
+            throw ("Forest array index out of range: " + (elementIndex as string))
+
+        local beforeValue = arr[elementIndex]
+        local beforeClass = forestControlClassName beforeValue
+        if not (forestControlArrayElementWritableClass beforeClass) do
+            throw ("Forest array element has no safe primitive adapter: " + propName + "[" + (elementIndex as string) + "] (" + beforeClass + ")")
+
+        local newValue = forestControlParseScalar valueType encodedValue
+        local newClass = forestControlClassName newValue
+
+        if beforeClass == "BooleanClass" and newClass != "BooleanClass" do
+            throw ("Forest array element type mismatch: expected BooleanClass, got " + newClass)
+        if beforeClass == "Integer" and newClass != "Integer" do
+            throw ("Forest array element type mismatch: expected Integer, got " + newClass)
+        if beforeClass == "Float" and newClass != "Float" do
+            throw ("Forest array element type mismatch: expected Float, got " + newClass)
+        if beforeClass == "String" and newClass != "String" do
+            throw ("Forest array element type mismatch: expected String, got " + newClass)
+
+        arr[elementIndex] = newValue
+
+        local afterValue = arr[elementIndex]
+        local afterClass = forestControlClassName afterValue
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+        try (redrawViews()) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"index\":" + (elementIndex as string) +
+        ",\"before_class\":" + (jsonString beforeClass) +
+        ",\"before_value\":" + (forestControlTypedValueJson beforeValue) +
+        ",\"after_class\":" + (jsonString afterClass) +
+        ",\"after_value\":" + (forestControlTypedValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlParsePoint3 encodedValue =
+    (
+        local rawValue = decodeBase64Utf8 encodedValue
+        local parts = filterString rawValue ","
+        if parts.count != 3 do
+            throw "POINT3 value must contain exactly x,y,z."
+
+        [parts[1] as float, parts[2] as float, parts[3] as float]
+    ),
+
+    fn forestControlArraySetPoint3Json nodeName propName elementIndex encodedValue =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest array property does not exist: " + propName)
+
+        local arr = getProperty node propToken
+        if (forestControlClassName arr) != "ArrayParameter" do
+            throw ("Forest property is not ArrayParameter: " + propName)
+
+        if elementIndex < 1 or elementIndex > arr.count do
+            throw ("Forest array index out of range: " + (elementIndex as string))
+
+        local beforeValue = arr[elementIndex]
+        local beforeClass = forestControlClassName beforeValue
+        if beforeClass != "Point3" do
+            throw ("Forest array element is not Point3: " + propName + "[" + (elementIndex as string) + "]")
+
+        local newValue = forestControlParsePoint3 encodedValue
+        arr[elementIndex] = newValue
+        local afterValue = arr[elementIndex]
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+        try (redrawViews()) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"index\":" + (elementIndex as string) +
+        ",\"before_class\":\"Point3\"" +
+        ",\"before_value\":" + (forestControlTypedValueJson beforeValue) +
+        ",\"after_class\":\"Point3\"" +
+        ",\"after_value\":" + (forestControlTypedValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlNodeReferenceAllowedProperty propName =
+    (
+        local p = toLower propName
+        p == "cobjlist" or
+        p == "arnodelist" or
+        p == "distpathnodes" or
+        p == "distrefnodes" or
+        p == "distpflownodes" or
+        p == "surflist" or
+        p == "efpainode" or
+        p == "efpaspline"
+    ),
+
+    fn forestControlArraySetNodeJson nodeName propName elementIndex encodedTargetName =
+    (
+        if not (forestControlNodeReferenceAllowedProperty propName) do
+            throw ("Forest array property is not an approved node-reference family: " + propName)
+
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest array property does not exist: " + propName)
+
+        local arr = getProperty node propToken
+        if (forestControlClassName arr) != "ArrayParameter" do
+            throw ("Forest property is not ArrayParameter: " + propName)
+
+        if elementIndex < 1 or elementIndex > arr.count do
+            throw ("Forest array index out of range: " + (elementIndex as string))
+
+        local targetName = decodeBase64Utf8 encodedTargetName
+        local targetNode = getNodeByName targetName
+        if targetNode == undefined do
+            throw ("Forest node reference target was not found: " + targetName)
+
+        local beforeValue = arr[elementIndex]
+        local beforeClass = forestControlClassName beforeValue
+        local beforeName = ""
+        if beforeValue != undefined do
+        (
+            try (beforeName = beforeValue.name) catch (beforeName = "")
+        )
+
+        arr[elementIndex] = targetNode
+
+        local afterValue = arr[elementIndex]
+        local afterName = ""
+        try (afterName = afterValue.name) catch()
+
+        if afterValue == undefined or afterName != targetNode.name do
+            throw ("Forest node reference write did not verify: " + propName)
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+        try (redrawViews()) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"index\":" + (elementIndex as string) +
+        ",\"before_class\":" + (jsonString beforeClass) +
+        ",\"before_node_name\":" + (jsonString beforeName) +
+        ",\"after_class\":" + (jsonString (forestControlClassName afterValue)) +
+        ",\"after_node_name\":" + (jsonString afterName) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlFindSceneMaterial materialName =
+    (
+        local found = undefined
+
+        try
+        (
+            for m in scenematerials while found == undefined do
+            (
+                local currentName = ""
+                try (currentName = m.name) catch()
+                if currentName == materialName do found = m
+            )
+        )
+        catch()
+
+        if found == undefined do
+        (
+            try
+            (
+                for m in meditmaterials while found == undefined do
+                (
+                    local currentName = ""
+                    try (currentName = m.name) catch()
+                    if currentName == materialName do found = m
+                )
+            )
+            catch()
+        )
+
+        found
+    ),
+
+    fn forestControlArraySetMaterialJson nodeName propName elementIndex encodedMaterialName =
+    (
+        if toLower propName != "matlist" do
+            throw ("Forest material adapter only supports matlist: " + propName)
+
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest array property does not exist: " + propName)
+
+        local arr = getProperty node propToken
+        if (forestControlClassName arr) != "ArrayParameter" do
+            throw ("Forest property is not ArrayParameter: " + propName)
+
+        if elementIndex < 1 or elementIndex > arr.count do
+            throw ("Forest array index out of range: " + (elementIndex as string))
+
+        local beforeValue = arr[elementIndex]
+        local beforeClass = forestControlClassName beforeValue
+        if beforeValue == undefined do
+            throw ("Forest material slot is undefined and cannot be rebound safely: " + propName + "[" + (elementIndex as string) + "]")
+
+        local materialName = decodeBase64Utf8 encodedMaterialName
+        local targetMaterial = forestControlFindSceneMaterial materialName
+        if targetMaterial == undefined do
+            throw ("Forest material reference target was not found: " + materialName)
+
+        local beforeName = ""
+        try (beforeName = beforeValue.name) catch()
+
+        arr[elementIndex] = targetMaterial
+
+        local afterValue = arr[elementIndex]
+        local afterName = ""
+        try (afterName = afterValue.name) catch()
+
+        if afterValue == undefined or afterName != targetMaterial.name do
+            throw ("Forest material reference write did not verify: " + propName)
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+        try (redrawViews()) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"index\":" + (elementIndex as string) +
+        ",\"before_class\":" + (jsonString beforeClass) +
+        ",\"before_material_name\":" + (jsonString beforeName) +
+        ",\"after_class\":" + (jsonString (forestControlClassName afterValue)) +
+        ",\"after_material_name\":" + (jsonString afterName) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlFindSceneBitmapTexture textureName =
+    (
+        local found = undefined
+
+        try
+        (
+            for m in getClassInstances Bitmaptexture while found == undefined do
+            (
+                local currentName = ""
+                try (currentName = m.name) catch()
+                if currentName == textureName do found = m
+            )
+        )
+        catch()
+
+        found
+    ),
+
+    fn forestControlSetTimeJson nodeName propName encodedTicks =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local beforeValue = getProperty node propToken
+        local beforeClass = forestControlClassName beforeValue
+        if beforeClass != "Time" do
+            throw ("Forest property is not Time: " + propName + " (" + beforeClass + ")")
+
+        local rawTicks = decodeBase64Utf8 encodedTicks
+        local newValue = rawTicks as time
+        setProperty node propToken newValue
+
+        local afterValue = getProperty node propToken
+        local afterClass = forestControlClassName afterValue
+        if afterClass != "Time" do
+            throw ("Forest Time property write did not preserve type: " + propName)
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"before_value\":" + (forestControlTypedValueJson beforeValue) +
+        ",\"after_value\":" + (forestControlTypedValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlSetBitmapJson nodeName propName encodedTextureName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local beforeValue = getProperty node propToken
+        local beforeClass = forestControlClassName beforeValue
+        if beforeClass != "Bitmaptexture" and beforeClass != "UndefinedClass" do
+            throw ("Forest property is not Bitmaptexture-compatible: " + propName + " (" + beforeClass + ")")
+
+        local textureName = decodeBase64Utf8 encodedTextureName
+        local targetTexture = forestControlFindSceneBitmapTexture textureName
+        if targetTexture == undefined do
+            throw ("Forest Bitmaptexture target was not found: " + textureName)
+
+        setProperty node propToken targetTexture
+
+        local afterValue = getProperty node propToken
+        local afterClass = forestControlClassName afterValue
+        local afterName = ""
+        try (afterName = afterValue.name) catch()
+
+        if afterClass != "Bitmaptexture" or afterName != targetTexture.name do
+            throw ("Forest Bitmaptexture reference write did not verify: " + propName)
+
+        try (update node) catch()
+        try (notifyDependents node) catch()
+        try (redrawViews()) catch()
+
+        local beforeName = ""
+        try (beforeName = beforeValue.name) catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"before_class\":" + (jsonString beforeClass) +
+        ",\"before_texture_name\":" + (jsonString beforeName) +
+        ",\"after_class\":" + (jsonString afterClass) +
+        ",\"after_texture_name\":" + (jsonString afterName) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlCurveMetadataJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local curve = getProperty node propToken
+        local valueClass = forestControlClassName curve
+        if valueClass != "CurveControl" do
+            throw ("Forest property is not CurveControl: " + propName + " (" + valueClass + ")")
+
+        local curveCount = 0
+        local canAccessCurves = false
+        try
+        (
+            curveCount = curve.numCurves
+            canAccessCurves = true
+        )
+        catch()
+
+        "{\"forest_name\":" + (jsonString node.name) +
+        ",\"property_name\":" + (jsonString propName) +
+        ",\"value_class\":\"CurveControl\"" +
+        ",\"num_curves\":" + (curveCount as string) +
+        ",\"curve_access\":" + (boolJson canAccessCurves) +
+        ",\"write_mode\":\"read_only_until_curve_adapter\"" +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlSafePropertyPreview target propToken =
+    (
+        local value = undefined
+        local valueClass = "UndefinedClass"
+        local preview = ""
+        local readable = false
+
+        try
+        (
+            value = getProperty target propToken
+            valueClass = forestControlClassName value
+            preview = value as string
+            readable = true
+        )
+        catch
+        (
+            preview = getCurrentException()
+        )
+
+        "{\"name\":" + (jsonString (propToken as string)) +
+        ",\"readable\":" + (boolJson readable) +
+        ",\"value_class\":" + (jsonString valueClass) +
+        ",\"preview\":" + (jsonString preview) + "}"
+    ),
+
+    fn forestControlCurveIntrospectionJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local target = getProperty node propToken
+        local targetClass = forestControlClassName target
+        if targetClass != "CurveControl" do
+            throw ("Forest property is not CurveControl: " + propName + " (" + targetClass + ")")
+
+        local props = #()
+        try (props = getPropNames target) catch()
+
+        local interfacesText = ""
+        try
+        (
+            local ss = stringStream ""
+            showInterfaces target to:ss
+            interfacesText = ss as string
+            close ss
+        )
+        catch
+        (
+            interfacesText = ""
+        )
+
+        local json = "{\"forest_name\":" + (jsonString node.name) +
+                     ",\"property_name\":" + (jsonString propName) +
+                     ",\"target_class\":" + (jsonString targetClass) +
+                     ",\"property_count\":" + (props.count as string) +
+                     ",\"properties\":["
+
+        for i = 1 to props.count do
+        (
+            if i > 1 do json += ","
+            json += forestControlSafePropertyPreview target props[i]
+        )
+
+        json += "],\"interfaces_text\":" + (jsonString interfacesText) +
+                ",\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
+    fn forestControlCurveClassIntrospectionJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local ctl = getProperty node propToken
+        local ctlClass = forestControlClassName ctl
+        if ctlClass != "CurveControl" do
+            throw ("Forest property is not CurveControl: " + propName + " (" + ctlClass + ")")
+
+        local curveProps = #()
+        try (curveProps = getPropNames ctl) catch()
+
+        local json = "{\"forest_name\":" + (jsonString node.name) +
+                     ",\"property_name\":" + (jsonString propName) +
+                     ",\"curve_object_count\":" + (curveProps.count as string) +
+                     ",\"curve_objects\":["
+
+        for ci = 1 to curveProps.count do
+        (
+            if ci > 1 do json += ","
+
+            local curveProp = curveProps[ci]
+            local curveObj = undefined
+            local curveClass = "UndefinedClass"
+            local nestedProps = #()
+            local interfacesText = ""
+
+            try
+            (
+                curveObj = getProperty ctl curveProp
+                curveClass = forestControlClassName curveObj
+                nestedProps = getPropNames curveObj
+            )
+            catch()
+
+            try
+            (
+                local ss = stringStream ""
+                showInterfaces curveObj to:ss
+                interfacesText = ss as string
+                close ss
+            )
+            catch
+            (
+                interfacesText = ""
+            )
+
+            json += "{\"curve_property\":" + (jsonString (curveProp as string)) +
+                    ",\"value_class\":" + (jsonString curveClass) +
+                    ",\"property_count\":" + (nestedProps.count as string) +
+                    ",\"properties\":["
+
+            for pi = 1 to nestedProps.count do
+            (
+                if pi > 1 do json += ","
+                json += forestControlSafePropertyPreview curveObj nestedProps[pi]
+            )
+
+            json += "],\"interfaces_text\":" + (jsonString interfacesText) + "}"
+        )
+
+        json += "],\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
+    fn forestControlCurveMethodProbeJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local ctl = getProperty node propToken
+        local ctlClass = forestControlClassName ctl
+        if ctlClass != "CurveControl" do
+            throw ("Forest property is not CurveControl: " + propName + " (" + ctlClass + ")")
+
+        local curveProps = #()
+        try (curveProps = getPropNames ctl) catch()
+
+        local json = "{\"forest_name\":" + (jsonString node.name) +
+                     ",\"property_name\":" + (jsonString propName) +
+                     ",\"curve_object_count\":" + (curveProps.count as string) +
+                     ",\"curve_objects\":["
+
+        for ci = 1 to curveProps.count do
+        (
+            if ci > 1 do json += ","
+
+            local curveProp = curveProps[ci]
+            local curveObj = getProperty ctl curveProp
+            local curveClass = forestControlClassName curveObj
+
+            local numPointsOk = false
+            local numPointsValue = 0
+            local numPointsError = ""
+            try
+            (
+                numPointsValue = curveObj.numPoints
+                numPointsOk = true
+            )
+            catch
+            (
+                numPointsError = getCurrentException()
+            )
+
+            local pointsOk = false
+            local pointsPreview = ""
+            local pointsError = ""
+            try
+            (
+                pointsPreview = curveObj.points as string
+                pointsOk = true
+            )
+            catch
+            (
+                pointsError = getCurrentException()
+            )
+
+            local getPointOk = false
+            local getPointPreview = ""
+            local getPointError = ""
+            if numPointsOk and numPointsValue > 0 then
+            (
+                try
+                (
+                    getPointPreview = (getPoint curveObj 1) as string
+                    getPointOk = true
+                )
+                catch
+                (
+                    getPointError = getCurrentException()
+                )
+            )
+            else
+            (
+                getPointError = "No readable point count."
+            )
+
+            local getValueOk = false
+            local getValuePreview = ""
+            local getValueError = ""
+            try
+            (
+                getValuePreview = (getValue curveObj currentTime 0.5) as string
+                getValueOk = true
+            )
+            catch
+            (
+                getValueError = getCurrentException()
+            )
+
+            local selectedOk = false
+            local selectedPreview = ""
+            local selectedError = ""
+            try
+            (
+                selectedPreview = (getSelectedPts curveObj) as string
+                selectedOk = true
+            )
+            catch
+            (
+                selectedError = getCurrentException()
+            )
+
+            local animatedOk = false
+            local animatedPreview = ""
+            local animatedError = ""
+            if numPointsOk and numPointsValue > 0 then
+            (
+                try
+                (
+                    animatedPreview = (isAnimated curveObj 1) as string
+                    animatedOk = true
+                )
+                catch
+                (
+                    animatedError = getCurrentException()
+                )
+            )
+            else
+            (
+                animatedError = "No readable point count."
+            )
+
+            local subCount = 0
+            local subNamesPreview = ""
+            local subAnimOk = false
+            local subAnimError = ""
+            try
+            (
+                subCount = curveObj.numSubs
+                subNamesPreview = (getSubAnimNames curveObj) as string
+                subAnimOk = true
+            )
+            catch
+            (
+                subAnimError = getCurrentException()
+            )
+
+            json += "{\"curve_property\":" + (jsonString (curveProp as string)) +
+                    ",\"value_class\":" + (jsonString curveClass) +
+                    ",\"num_points\":{\"ok\":" + (boolJson numPointsOk) +
+                    ",\"value\":" + (numPointsValue as string) +
+                    ",\"error\":" + (jsonString numPointsError) + "}" +
+                    ",\"points\":{\"ok\":" + (boolJson pointsOk) +
+                    ",\"preview\":" + (jsonString pointsPreview) +
+                    ",\"error\":" + (jsonString pointsError) + "}" +
+                    ",\"get_point\":{\"ok\":" + (boolJson getPointOk) +
+                    ",\"preview\":" + (jsonString getPointPreview) +
+                    ",\"error\":" + (jsonString getPointError) + "}" +
+                    ",\"get_value\":{\"ok\":" + (boolJson getValueOk) +
+                    ",\"preview\":" + (jsonString getValuePreview) +
+                    ",\"error\":" + (jsonString getValueError) + "}" +
+                    ",\"get_selected_pts\":{\"ok\":" + (boolJson selectedOk) +
+                    ",\"preview\":" + (jsonString selectedPreview) +
+                    ",\"error\":" + (jsonString selectedError) + "}" +
+                    ",\"is_animated\":{\"ok\":" + (boolJson animatedOk) +
+                    ",\"preview\":" + (jsonString animatedPreview) +
+                    ",\"error\":" + (jsonString animatedError) + "}" +
+                    ",\"subanims\":{\"ok\":" + (boolJson subAnimOk) +
+                    ",\"count\":" + (subCount as string) +
+                    ",\"names_preview\":" + (jsonString subNamesPreview) +
+                    ",\"error\":" + (jsonString subAnimError) + "}}"
+        )
+
+        json += "],\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
+    fn forestControlCurveSubAnimProbeJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local ctl = getProperty node propToken
+        local ctlClass = forestControlClassName ctl
+        if ctlClass != "CurveControl" do
+            throw ("Forest property is not CurveControl: " + propName + " (" + ctlClass + ")")
+
+        local curveProps = #()
+        try (curveProps = getPropNames ctl) catch()
+
+        local json = "{\"forest_name\":" + (jsonString node.name) +
+                     ",\"property_name\":" + (jsonString propName) +
+                     ",\"curve_object_count\":" + (curveProps.count as string) +
+                     ",\"curve_objects\":["
+
+        for ci = 1 to curveProps.count do
+        (
+            if ci > 1 do json += ","
+
+            local curveProp = curveProps[ci]
+            local curveObj = getProperty ctl curveProp
+            local curveClass = forestControlClassName curveObj
+            local subCount = 0
+            local subNames = #()
+
+            try
+            (
+                subCount = curveObj.numSubs
+                subNames = getSubAnimNames curveObj
+            )
+            catch()
+
+            json += "{\"curve_property\":" + (jsonString (curveProp as string)) +
+                    ",\"value_class\":" + (jsonString curveClass) +
+                    ",\"subanim_count\":" + (subCount as string) +
+                    ",\"subanims\":["
+
+            for si = 1 to subCount do
+            (
+                if si > 1 do json += ","
+
+                local subName = ""
+                if si <= subNames.count do subName = subNames[si] as string
+
+                local subObj = undefined
+                local subClass = "UndefinedClass"
+                local subPreview = ""
+                local subReadable = false
+                local getValueOk = false
+                local getValuePreview = ""
+                local getValueClass = "UndefinedClass"
+                local getValueError = ""
+                local valuePropOk = false
+                local valuePropPreview = ""
+                local valuePropClass = "UndefinedClass"
+                local valuePropError = ""
+                local nestedCount = 0
+                local nestedNamesPreview = ""
+                local nestedOk = false
+                local nestedError = ""
+
+                try
+                (
+                    subObj = getSubAnim curveObj si
+                    subClass = forestControlClassName subObj
+                    subPreview = subObj as string
+                    subReadable = true
+                )
+                catch()
+
+                if subReadable then
+                (
+                    try
+                    (
+                        local gv = getValue subObj currentTime
+                        getValuePreview = gv as string
+                        getValueClass = forestControlClassName gv
+                        getValueOk = true
+                    )
+                    catch
+                    (
+                        getValueError = getCurrentException()
+                    )
+
+                    try
+                    (
+                        local vp = subObj.value
+                        valuePropPreview = vp as string
+                        valuePropClass = forestControlClassName vp
+                        valuePropOk = true
+                    )
+                    catch
+                    (
+                        valuePropError = getCurrentException()
+                    )
+
+                    try
+                    (
+                        nestedCount = subObj.numSubs
+                        nestedNamesPreview = (getSubAnimNames subObj) as string
+                        nestedOk = true
+                    )
+                    catch
+                    (
+                        nestedError = getCurrentException()
+                    )
+                )
+
+                json += "{\"index\":" + (si as string) +
+                        ",\"name\":" + (jsonString subName) +
+                        ",\"readable\":" + (boolJson subReadable) +
+                        ",\"value_class\":" + (jsonString subClass) +
+                        ",\"preview\":" + (jsonString subPreview) +
+                        ",\"get_value\":{\"ok\":" + (boolJson getValueOk) +
+                        ",\"value_class\":" + (jsonString getValueClass) +
+                        ",\"preview\":" + (jsonString getValuePreview) +
+                        ",\"error\":" + (jsonString getValueError) + "}" +
+                        ",\"value_property\":{\"ok\":" + (boolJson valuePropOk) +
+                        ",\"value_class\":" + (jsonString valuePropClass) +
+                        ",\"preview\":" + (jsonString valuePropPreview) +
+                        ",\"error\":" + (jsonString valuePropError) + "}" +
+                        ",\"nested_subanims\":{\"ok\":" + (boolJson nestedOk) +
+                        ",\"count\":" + (nestedCount as string) +
+                        ",\"names_preview\":" + (jsonString nestedNamesPreview) +
+                        ",\"error\":" + (jsonString nestedError) + "}}"
+            )
+
+            json += "]}"
+        )
+
+        json += "],\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
+    fn forestControlControllerKeyPreviewJson controller =
+    (
+        local keyCount = 0
+        local countOk = false
+        local countError = ""
+        try
+        (
+            keyCount = numKeys controller
+            countOk = true
+        )
+        catch
+        (
+            countError = getCurrentException()
+        )
+
+        local keysPreview = ""
+        local keysOk = false
+        local keysError = ""
+        try
+        (
+            keysPreview = controller.keys as string
+            keysOk = true
+        )
+        catch
+        (
+            keysError = getCurrentException()
+        )
+
+        "{\"count\":{\"ok\":" + (boolJson countOk) +
+        ",\"value\":" + (keyCount as string) +
+        ",\"error\":" + (jsonString countError) + "}" +
+        ",\"keys\":{\"ok\":" + (boolJson keysOk) +
+        ",\"preview\":" + (jsonString keysPreview) +
+        ",\"error\":" + (jsonString keysError) + "}}"
+    ),
+
+    fn forestControlCurveControllerProbeJson nodeName propName =
+    (
+        local node = findForestControlNode nodeName
+        local propToken = propName as name
+        if not (isProperty node propToken) do
+            throw ("Forest property does not exist: " + propName)
+
+        local ctl = getProperty node propToken
+        local ctlClass = forestControlClassName ctl
+        if ctlClass != "CurveControl" do
+            throw ("Forest property is not CurveControl: " + propName + " (" + ctlClass + ")")
+
+        local curveProps = #()
+        try (curveProps = getPropNames ctl) catch()
+
+        local json = "{\"forest_name\":" + (jsonString node.name) +
+                     ",\"property_name\":" + (jsonString propName) +
+                     ",\"curve_object_count\":" + (curveProps.count as string) +
+                     ",\"curve_objects\":["
+
+        for ci = 1 to curveProps.count do
+        (
+            if ci > 1 do json += ","
+
+            local curveProp = curveProps[ci]
+            local curveObj = getProperty ctl curveProp
+            local subCount = 0
+            local subNames = #()
+            try
+            (
+                subCount = curveObj.numSubs
+                subNames = getSubAnimNames curveObj
+            )
+            catch()
+
+            json += "{\"curve_property\":" + (jsonString (curveProp as string)) +
+                    ",\"subanim_count\":" + (subCount as string) +
+                    ",\"subanims\":["
+
+            for si = 1 to subCount do
+            (
+                if si > 1 do json += ","
+
+                local subName = ""
+                if si <= subNames.count do subName = subNames[si] as string
+
+                local subObj = undefined
+                try (subObj = getSubAnim curveObj si) catch()
+
+                local controller = undefined
+                local controllerOk = false
+                local controllerClass = "UndefinedClass"
+                local controllerPreview = ""
+                local controllerError = ""
+
+                try
+                (
+                    controller = subObj.controller
+                    controllerClass = forestControlClassName controller
+                    controllerPreview = controller as string
+                    controllerOk = (controller != undefined)
+                )
+                catch
+                (
+                    controllerError = getCurrentException()
+                )
+
+                local controllerValueOk = false
+                local controllerValueClass = "UndefinedClass"
+                local controllerValuePreview = ""
+                local controllerValueError = ""
+                if controllerOk then
+                (
+                    try
+                    (
+                        local cv = getValue controller currentTime
+                        controllerValueClass = forestControlClassName cv
+                        controllerValuePreview = cv as string
+                        controllerValueOk = true
+                    )
+                    catch
+                    (
+                        controllerValueError = getCurrentException()
+                    )
+                )
+                else
+                (
+                    controllerValueError = "Controller unavailable."
+                )
+
+                local controllerProps = #()
+                local controllerPropsOk = false
+                local controllerPropsError = ""
+                if controllerOk then
+                (
+                    try
+                    (
+                        controllerProps = getPropNames controller
+                        controllerPropsOk = true
+                    )
+                    catch
+                    (
+                        controllerPropsError = getCurrentException()
+                    )
+                )
+
+                local propJson = "["
+                for pi = 1 to controllerProps.count do
+                (
+                    if pi > 1 do propJson += ","
+                    propJson += forestControlSafePropertyPreview controller controllerProps[pi]
+                )
+                propJson += "]"
+
+                local keyJson = "{\"count\":{\"ok\":false,\"value\":0,\"error\":\"Controller unavailable.\"},\"keys\":{\"ok\":false,\"preview\":\"\",\"error\":\"Controller unavailable.\"}}"
+                if controllerOk do keyJson = forestControlControllerKeyPreviewJson controller
+
+                json += "{\"index\":" + (si as string) +
+                        ",\"name\":" + (jsonString subName) +
+                        ",\"controller\":{\"ok\":" + (boolJson controllerOk) +
+                        ",\"value_class\":" + (jsonString controllerClass) +
+                        ",\"preview\":" + (jsonString controllerPreview) +
+                        ",\"error\":" + (jsonString controllerError) + "}" +
+                        ",\"controller_value\":{\"ok\":" + (boolJson controllerValueOk) +
+                        ",\"value_class\":" + (jsonString controllerValueClass) +
+                        ",\"preview\":" + (jsonString controllerValuePreview) +
+                        ",\"error\":" + (jsonString controllerValueError) + "}" +
+                        ",\"controller_properties\":{\"ok\":" + (boolJson controllerPropsOk) +
+                        ",\"count\":" + (controllerProps.count as string) +
+                        ",\"properties\":" + propJson +
+                        ",\"error\":" + (jsonString controllerPropsError) + "}" +
+                        ",\"keys\":" + keyJson + "}"
+            )
+
+            json += "]}"
+        )
+
+        json += "],\"read_only\":true,\"verified\":true}"
+        json
+    ),
+
     fn handleCommand rawCommand =
     (
         local cleanCommand = trimLeft (trimRight rawCommand)
@@ -5973,6 +7280,304 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "RELOAD_BRIDGE" (getCurrentException())
+            )
+        )
+
+        if command == "FOREST_CONTROL_LIST" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_LIST\",\"data\":" +
+                       forestControlListJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_LIST" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_INVENTORY|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 2 do throw "FOREST_CONTROL_INVENTORY requires encoded node name."
+                local nodeName = decodeBase64Utf8 parts[2]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_INVENTORY\",\"data\":" +
+                       forestControlInventoryJson nodeName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_INVENTORY" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_GET|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_GET requires encoded node name and property name."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_GET\",\"data\":" +
+                       forestControlGetJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_GET" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 5 do throw "FOREST_CONTROL_SET requires node, property, type and value."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local valueType = parts[4]
+                local encodedValue = parts[5]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET\",\"data\":" +
+                       forestControlSetJson nodeName propName valueType encodedValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_ARRAY_GET|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 4 do throw "FOREST_CONTROL_ARRAY_GET requires node, property and index."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local elementIndex = parts[4] as integer
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_ARRAY_GET\",\"data\":" +
+                       forestControlArrayGetJson nodeName propName elementIndex + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_ARRAY_GET" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_ARRAY_SET|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FOREST_CONTROL_ARRAY_SET requires node, property, index, type and value."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local elementIndex = parts[4] as integer
+                local valueType = parts[5]
+                local encodedValue = parts[6]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_ARRAY_SET\",\"data\":" +
+                       forestControlArraySetJson nodeName propName elementIndex valueType encodedValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_ARRAY_SET" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_ARRAY_SET_POINT3|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 5 do throw "FOREST_CONTROL_ARRAY_SET_POINT3 requires node, property, index and value."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local elementIndex = parts[4] as integer
+                local encodedValue = parts[5]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_ARRAY_SET_POINT3\",\"data\":" +
+                       forestControlArraySetPoint3Json nodeName propName elementIndex encodedValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_ARRAY_SET_POINT3" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_ARRAY_SET_NODE|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 5 do throw "FOREST_CONTROL_ARRAY_SET_NODE requires node, property, index and target node."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local elementIndex = parts[4] as integer
+                local encodedTargetName = parts[5]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_ARRAY_SET_NODE\",\"data\":" +
+                       forestControlArraySetNodeJson nodeName propName elementIndex encodedTargetName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_ARRAY_SET_NODE" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_ARRAY_SET_MATERIAL|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 5 do throw "FOREST_CONTROL_ARRAY_SET_MATERIAL requires node, property, index and material name."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local elementIndex = parts[4] as integer
+                local encodedMaterialName = parts[5]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_ARRAY_SET_MATERIAL\",\"data\":" +
+                       forestControlArraySetMaterialJson nodeName propName elementIndex encodedMaterialName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_ARRAY_SET_MATERIAL" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_TIME|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 4 do throw "FOREST_CONTROL_SET_TIME requires node, property and ticks."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local encodedTicks = parts[4]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_TIME\",\"data\":" +
+                       forestControlSetTimeJson nodeName propName encodedTicks + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_TIME" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_BITMAP|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 4 do throw "FOREST_CONTROL_SET_BITMAP requires node, property and texture name."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                local encodedTextureName = parts[4]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_BITMAP\",\"data\":" +
+                       forestControlSetBitmapJson nodeName propName encodedTextureName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_BITMAP" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_CURVE_METADATA|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_CURVE_METADATA requires node and property."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_CURVE_METADATA\",\"data\":" +
+                       forestControlCurveMetadataJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_CURVE_METADATA" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_CURVE_INTROSPECT|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_CURVE_INTROSPECT requires node and property."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_CURVE_INTROSPECT\",\"data\":" +
+                       forestControlCurveIntrospectionJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_CURVE_INTROSPECT" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_CURVECLASS_INTROSPECT|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_CURVECLASS_INTROSPECT requires node and property."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_CURVECLASS_INTROSPECT\",\"data\":" +
+                       forestControlCurveClassIntrospectionJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_CURVECLASS_INTROSPECT" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_CURVE_METHOD_PROBE|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_CURVE_METHOD_PROBE requires node and property."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_CURVE_METHOD_PROBE\",\"data\":" +
+                       forestControlCurveMethodProbeJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_CURVE_METHOD_PROBE" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_CURVE_SUBANIM_PROBE|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_CURVE_SUBANIM_PROBE requires node and property."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_CURVE_SUBANIM_PROBE\",\"data\":" +
+                       forestControlCurveSubAnimProbeJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_CURVE_SUBANIM_PROBE" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_CURVE_CONTROLLER_PROBE|*" then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_CURVE_CONTROLLER_PROBE requires node and property."
+                local nodeName = decodeBase64Utf8 parts[2]
+                local propName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_CURVE_CONTROLLER_PROBE\",\"data\":" +
+                       forestControlCurveControllerProbeJson nodeName propName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_CURVE_CONTROLLER_PROBE" (getCurrentException())
             )
         )
 

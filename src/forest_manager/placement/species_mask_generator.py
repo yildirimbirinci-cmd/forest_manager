@@ -196,3 +196,127 @@ def generate_species_masks(
         "layers": layers,
         "verified": ownership_sum_ok,
     }
+
+
+def _clustered_score_fields(
+    width: int,
+    height: int,
+    seed: int,
+) -> list[list[tuple[float, float, float]]]:
+    """Deterministic three-species landscape clusters for the 75 m tiled map."""
+    rows: list[list[tuple[float, float, float]]] = []
+    for py in range(height):
+        y = (py + 0.5) / height
+        row: list[tuple[float, float, float]] = []
+        for px in range(width):
+            x = (px + 0.5) / width
+
+            # Lavandula: two broad connected foreground masses with a soft bridge.
+            foreground = (
+                1.70 * _gaussian(x, y, 0.24, 0.34, 0.31)
+                + 1.55 * _gaussian(x, y, 0.68, 0.67, 0.34)
+                + 0.72 * _gaussian(x, y, 0.47, 0.50, 0.30)
+                + 0.08 * _noise_field(x, y, seed + 101)
+            )
+
+            # Butomus: smaller separated accents, avoiding a uniform carpet.
+            accent = (
+                1.75 * _gaussian(x, y, 0.71, 0.20, 0.115)
+                + 1.60 * _gaussian(x, y, 0.34, 0.67, 0.105)
+                + 1.50 * _gaussian(x, y, 0.83, 0.79, 0.095)
+                + 1.32 * _gaussian(x, y, 0.18, 0.82, 0.090)
+                + 0.10 * _noise_field(x, y, seed + 211)
+            )
+
+            # Berberis: fewer, larger structural islands around the composition.
+            structural = (
+                1.70 * _gaussian(x, y, 0.17, 0.73, 0.19)
+                + 1.62 * _gaussian(x, y, 0.79, 0.47, 0.21)
+                + 1.25 * _gaussian(x, y, 0.53, 0.16, 0.17)
+                + 0.07 * _noise_field(x, y, seed + 307)
+            )
+
+            row.append((foreground, accent, structural))
+        rows.append(row)
+    return rows
+
+
+def generate_clustered_species_masks(
+    output_dir: Path,
+    *,
+    width: int = 512,
+    height: int = 512,
+    seed: int = 58173,
+    blur_radius: float = 4.0,
+    specs: tuple[SpeciesMaskSpec, ...] = DEFAULT_SPECS,
+) -> dict:
+    """Generate exact-ratio masks with stronger, species-specific cluster character."""
+    if width <= 0 or height <= 0:
+        raise ValueError("Mask dimensions must be positive.")
+    if len(specs) != 3:
+        raise ValueError("Exactly three species mask specs are required.")
+    if abs(sum(s.coverage_percent for s in specs) - 100.0) > 0.01:
+        raise ValueError("Species mask coverage must total 100%.")
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    fields = _clustered_score_fields(width, height, seed)
+    owners, counts = _assign_exact_coverage(fields, specs)
+    total = width * height
+
+    layers = []
+    binary_images = []
+    for species_index, spec in enumerate(specs):
+        pixels = [255 if owner == species_index else 0 for owner in owners]
+        primary = Image.new("L", (width, height))
+        primary.putdata(pixels)
+        binary_images.append(primary)
+
+        soft = primary.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+
+        primary_path = output_dir / spec.filename.replace(".png", "_primary.png")
+        soft_path = output_dir / spec.filename
+        primary.save(primary_path, format="PNG", optimize=True)
+        soft.save(soft_path, format="PNG", optimize=True)
+
+        achieved = counts[species_index] * 100.0 / total
+        layers.append(
+            {
+                "key": spec.key,
+                "target_coverage_percent": spec.coverage_percent,
+                "achieved_primary_coverage_percent": round(achieved, 4),
+                "primary_pixel_count": counts[species_index],
+                "primary_mask": str(primary_path),
+                "soft_mask": str(soft_path),
+            }
+        )
+
+    ownership_sum_ok = True
+    for pixel_index in range(total):
+        active = 0
+        for image in binary_images:
+            if image.getdata()[pixel_index] == 255:
+                active += 1
+        if active != 1:
+            ownership_sum_ok = False
+            break
+
+    return {
+        "policy": "deterministic_species_cluster_masks_v2",
+        "profile": {
+            "foreground_mass": "broad_connected_masses",
+            "mid_accent": "small_separated_islands",
+            "structural_shrub": "large_structural_islands",
+        },
+        "width": width,
+        "height": height,
+        "seed": seed,
+        "blur_radius_pixels": blur_radius,
+        "coverage_total_percent": round(
+            sum(layer["achieved_primary_coverage_percent"] for layer in layers),
+            4,
+        ),
+        "exclusive_primary_ownership": ownership_sum_ok,
+        "layers": layers,
+        "verified": ownership_sum_ok,
+    }
