@@ -8,7 +8,7 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 49491
-EXPECTED_BRIDGE_VERSION = "0.9.20"
+EXPECTED_BRIDGE_VERSION = "0.9.39"
 
 
 def project_root() -> Path:
