@@ -5,7 +5,7 @@ from math import cos, exp, pi, sin
 from pathlib import Path
 from typing import Iterable
 
-from PIL import Image, ImageFilter
+from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
 @dataclass(frozen=True)
@@ -84,6 +84,78 @@ def _target_counts(total: int, specs: Iterable[SpeciesMaskSpec]) -> list[int]:
     return counts
 
 
+def _area_mask_from_normalized_rings(
+    width: int,
+    height: int,
+    normalized_rings: Iterable[Iterable[tuple[float, float]]] | None,
+) -> Image.Image:
+    mask = Image.new("L", (width, height), 0)
+    if normalized_rings is None:
+        return Image.new("L", (width, height), 255)
+
+    rings = [list(ring) for ring in normalized_rings]
+    if not rings:
+        raise ValueError("normalized_rings must contain at least one polygon ring.")
+
+    draw = ImageDraw.Draw(mask)
+    for ring_index, ring in enumerate(rings):
+        if len(ring) < 3:
+            raise ValueError("Each normalized spline ring must contain at least three points.")
+        points: list[tuple[float, float]] = []
+        for x, y in ring:
+            x = min(max(float(x), 0.0), 1.0)
+            y = min(max(float(y), 0.0), 1.0)
+            px = x * (width - 1)
+            py = y * (height - 1)
+            points.append((px, py))
+        # The first ring is the outer boundary; later rings are treated as holes.
+        draw.polygon(points, fill=255 if ring_index == 0 else 0)
+
+    return mask
+
+
+def _assign_exact_coverage_in_area(
+    fields: list[list[tuple[float, float, float]]],
+    specs: tuple[SpeciesMaskSpec, ...],
+    area_mask: Image.Image,
+) -> tuple[list[int], list[int], int]:
+    height = len(fields)
+    width = len(fields[0])
+    area_pixels = list(area_mask.getdata())
+    active_indices = [index for index, value in enumerate(area_pixels) if value > 0]
+    area_total = len(active_indices)
+    if area_total <= 0:
+        raise ValueError("normalized_rings produced an empty spline area.")
+
+    targets = _target_counts(area_total, specs)
+    ranked: list[tuple[float, int, int]] = []
+    for index in active_indices:
+        y, x = divmod(index, width)
+        vals = fields[y][x]
+        order = sorted(range(3), key=lambda i: vals[i], reverse=True)
+        margin = vals[order[0]] - vals[order[1]]
+        ranked.append((margin, y, x))
+    ranked.sort(reverse=True)
+
+    remaining = targets[:]
+    owners = [-1] * (width * height)
+    counts = [0, 0, 0]
+    for _, y, x in ranked:
+        vals = fields[y][x]
+        candidates = sorted(range(3), key=lambda i: vals[i], reverse=True)
+        chosen = next((i for i in candidates if remaining[i] > 0), None)
+        if chosen is None:
+            raise RuntimeError("No remaining mask quota during clipped assignment.")
+        index = y * width + x
+        owners[index] = chosen
+        remaining[chosen] -= 1
+        counts[chosen] += 1
+
+    if any(value != 0 for value in remaining):
+        raise RuntimeError("Clipped mask quota assignment did not finish exactly.")
+    return owners, counts, area_total
+
+
 def _assign_exact_coverage(
     fields: list[list[tuple[float, float, float]]],
     specs: tuple[SpeciesMaskSpec, ...],
@@ -131,6 +203,7 @@ def generate_species_masks(
     seed: int = 58173,
     blur_radius: float = 6.0,
     specs: tuple[SpeciesMaskSpec, ...] = DEFAULT_SPECS,
+    normalized_rings: Iterable[Iterable[tuple[float, float]]] | None = None,
 ) -> dict:
     if width <= 0 or height <= 0:
         raise ValueError("Mask dimensions must be positive.")
@@ -142,7 +215,12 @@ def generate_species_masks(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     fields = _score_fields(width, height, seed)
-    owners, counts = _assign_exact_coverage(fields, specs)
+    area_mask = _area_mask_from_normalized_rings(width, height, normalized_rings)
+    if normalized_rings is None:
+        owners, counts = _assign_exact_coverage(fields, specs)
+        area_total = width * height
+    else:
+        owners, counts, area_total = _assign_exact_coverage_in_area(fields, specs, area_mask)
     total = width * height
 
     layers = []
@@ -154,13 +232,15 @@ def generate_species_masks(
         binary_images.append(primary)
 
         soft = primary.filter(ImageFilter.GaussianBlur(radius=blur_radius))
+        if normalized_rings is not None:
+            soft = ImageChops.multiply(soft, area_mask)
 
         primary_path = output_dir / spec.filename.replace(".png", "_primary.png")
         soft_path = output_dir / spec.filename
         primary.save(primary_path, format="PNG", optimize=True)
         soft.save(soft_path, format="PNG", optimize=True)
 
-        achieved = counts[species_index] * 100.0 / total
+        achieved = counts[species_index] * 100.0 / area_total
         layers.append(
             {
                 "key": spec.key,
@@ -172,23 +252,26 @@ def generate_species_masks(
             }
         )
 
-    # Validate one-and-only-one primary owner per pixel.
+    # Validate one-and-only-one primary owner inside the active spline area,
+    # and zero ownership outside it when clipping is enabled.
     ownership_sum_ok = True
+    area_pixels = list(area_mask.getdata())
+    binary_pixels = [list(image.getdata()) for image in binary_images]
     for pixel_index in range(total):
-        active = 0
-        for image in binary_images:
-            if image.getdata()[pixel_index] == 255:
-                active += 1
-        if active != 1:
+        active = sum(1 for pixels in binary_pixels if pixels[pixel_index] == 255)
+        expected = 1 if area_pixels[pixel_index] > 0 else 0
+        if active != expected:
             ownership_sum_ok = False
             break
 
     return {
-        "policy": "deterministic_species_masks_v1",
+        "policy": "deterministic_species_masks_v2" if normalized_rings is not None else "deterministic_species_masks_v1",
         "width": width,
         "height": height,
         "seed": seed,
         "blur_radius_pixels": blur_radius,
+        "spline_polygon_applied": normalized_rings is not None,
+        "area_pixel_count": area_total,
         "coverage_total_percent": round(sum(
             layer["achieved_primary_coverage_percent"] for layer in layers
         ), 4),
