@@ -9,8 +9,8 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 49491
-EXPECTED_BRIDGE_VERSION = "0.9.41"
-EXPECTED_BRIDGE_BUILD_ID = "stage5d25-density-restartsafe-20260815a"
+EXPECTED_BRIDGE_VERSION = "0.9.51"
+EXPECTED_BRIDGE_BUILD_ID = "stage5d29-point-cloud-default-20260815a"
 
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"

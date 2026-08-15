@@ -57,6 +57,18 @@ def main() -> int:
         return 8
     if not data.get("density_units_preserved"):
         return 9
+    if not data.get("viewport_refresh"):
+        return 16
+    if data.get("real_world_scale") is not False:
+        return 20
+    if data.get("uv_mapping") != "normalized_area_0_1":
+        return 21
+    if not data.get("area_node"):
+        return 17
+    if not data.get("source_node"):
+        return 18
+    if int(data.get("generated_items", 0)) <= 0:
+        return 19
 
     active = [layer for layer in layers if layer.get("active")]
     if len(active) != 1:

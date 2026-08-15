@@ -50,8 +50,8 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.9.41\"" +
-        ",\"bridge_build_id\":\"stage5d25-density-restartsafe-20260815a\"}"
+        ",\"bridge_version\":\"0.9.51\"" +
+        ",\"bridge_build_id\":\"stage5d29-point-cloud-default-20260815a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -188,7 +188,7 @@ struct ForestManagerBridgeState
         for i = 0 to (samples - 1) do
         (
             local t = (i as float) / (samples as float)
-            local p = pathInterp node splineIndex t
+            local p = interpCurve3D node splineIndex t
             append points p
         )
 
@@ -369,6 +369,66 @@ struct ForestManagerBridgeState
         available
     ),
 
+    fn setForestPointCloudDisplay forestNode =
+    (
+        if forestNode == undefined do return false
+
+        local isForest = false
+        try (isForest = isKindOf forestNode ::Forest_Pro) catch (isForest = false)
+        if not isForest do return false
+
+        if not (isProperty forestNode #vmesh) do
+            throw ("Forest Pack viewport display property vmesh is unavailable: " + forestNode.name)
+
+        -- Forest Pack MaxScript: vmesh=3 is Points Cloud viewport mode.
+        -- Render settings are intentionally untouched.
+        forestNode.vmesh = 3
+        if forestNode.vmesh != 3 do
+            throw ("Forest Pack Points Cloud verification failed: " + forestNode.name)
+
+        try (forestNode.trees.update()) catch()
+        try (forestNode.trees.update_ui()) catch()
+        try (notifyDependents forestNode) catch()
+        true
+    ),
+
+    fn setAllForestPointCloudJson =
+    (
+        if not (forestPackAvailable()) do
+            throw "Forest Pack Pro class ::Forest_Pro is not available."
+
+        local changed = #()
+        local forestCount = 0
+        for obj in objects do
+        (
+            local isForest = false
+            try (isForest = isKindOf obj ::Forest_Pro) catch (isForest = false)
+            if isForest do
+            (
+                forestCount += 1
+                if setForestPointCloudDisplay obj do append changed obj.name
+            )
+        )
+
+        completeRedraw()
+
+        local namesJson = "["
+        for i = 1 to changed.count do
+        (
+            if i > 1 do namesJson += ","
+            namesJson += jsonString changed[i]
+        )
+        namesJson += "]"
+
+        "{\"viewport_display\":\"points_cloud\"" +
+        ",\"vmesh\":3" +
+        ",\"forest_count\":" + (forestCount as string) +
+        ",\"changed_count\":" + (changed.count as string) +
+        ",\"forest_names\":" + namesJson +
+        ",\"render_settings_changed\":false" +
+        ",\"verified\":true}"
+    ),
+
     fn getForestPackInfoJson =
     (
         local available = forestPackAvailable()
@@ -505,6 +565,7 @@ struct ForestManagerBridgeState
         try
         (
             forestNode = ::Forest_Pro()
+            setForestPointCloudDisplay forestNode
             forestNode.name = makeForestName()
             areaIndex = addSplineIncludeArea forestNode splineNode
 
@@ -785,6 +846,7 @@ struct ForestManagerBridgeState
         try
         (
             forestNode = ::Forest_Pro()
+            setForestPointCloudDisplay forestNode
             forestNode.name = "FM_Forest_001"
             areaIndex = addSplineIncludeArea forestNode splineNode
 
@@ -1355,6 +1417,86 @@ struct ForestManagerBridgeState
             )
         )
         result
+    ),
+
+    fn getForestAreaPolygonJson samples:256 =
+    (
+        if samples < 32 do samples = 32
+
+        local sourceForest = getNodeByName "FM_Forest_001"
+        if sourceForest == undefined do
+            throw "FM_Forest_001 was not found."
+
+        local splineNode = findForestAreaSpline sourceForest
+        if splineNode == undefined do
+            throw "FM_Forest_001 has no bound spline area."
+
+        local splineCount = 0
+        try (splineCount = numSplines splineNode) catch (splineCount = 0)
+        if splineCount < 1 do throw "Bound Forest area object is not a spline."
+
+        local rings = #()
+        local minX = 1.0e30
+        local minY = 1.0e30
+        local maxX = -1.0e30
+        local maxY = -1.0e30
+
+        for splineIndex = 1 to splineCount do
+        (
+            if not (isClosed splineNode splineIndex) do
+                throw ("Forest area contains an open spline at index " + (splineIndex as string))
+
+            local ring = #()
+            for i = 0 to (samples - 1) do
+            (
+                local t = (i as float) / (samples as float)
+                local p = interpCurve3D splineNode splineIndex t
+                append ring p
+                if p.x < minX do minX = p.x
+                if p.y < minY do minY = p.y
+                if p.x > maxX do maxX = p.x
+                if p.y > maxY do maxY = p.y
+            )
+            append rings ring
+        )
+
+        local width = maxX - minX
+        local height = maxY - minY
+        if width <= 0.0 or height <= 0.0 do
+            throw "Forest area spline polygon has invalid bounds."
+
+        local ringsJson = "["
+        for ringIndex = 1 to rings.count do
+        (
+            if ringIndex > 1 do ringsJson += ","
+            ringsJson += "["
+            local ring = rings[ringIndex]
+            for pointIndex = 1 to ring.count do
+            (
+                if pointIndex > 1 do ringsJson += ","
+                local p = ring[pointIndex]
+                local nx = (p.x - minX) / width
+                -- PIL raster Y grows downward while Max Y/V grows upward.
+                local ny = 1.0 - ((p.y - minY) / height)
+                ringsJson += "[" + (nx as string) + "," + (ny as string) + "]"
+            )
+            ringsJson += "]"
+        )
+        ringsJson += "]"
+
+        local oneMeter = 0.0
+        try (oneMeter = units.decodeValue "1m") catch (oneMeter = 0.0)
+        if oneMeter <= 0.0 do throw "Could not resolve active scene meter conversion."
+
+        "{\"forest_name\":\"FM_Forest_001\"" +
+        ",\"spline_name\":" + (jsonString splineNode.name) +
+        ",\"spline_count\":" + (splineCount as string) +
+        ",\"samples_per_spline\":" + (samples as string) +
+        ",\"bounds_width_meters\":" + ((width / oneMeter) as string) +
+        ",\"bounds_height_meters\":" + ((height / oneMeter) as string) +
+        ",\"normalized_rings\":" + ringsJson +
+        ",\"coordinate_space\":\"normalized_bbox_with_pil_y_flip\"" +
+        ",\"verified\":true}"
     ),
 
     fn calculateAdaptiveDistributionUnits splineNode =
@@ -3112,6 +3254,52 @@ struct ForestManagerBridgeState
         jsonString (value as string)
     ),
 
+    fn refreshForestPreviewNode forestNode =
+    (
+        if forestNode == undefined do return false
+        try (if isProperty forestNode #manualupdate do forestNode.manualupdate = false) catch()
+        try (forestNode.update()) catch()
+        try (notifyDependents forestNode partID:#all message:#change) catch()
+        try (redrawViews()) catch()
+        try (completeRedraw()) catch()
+        true
+    ),
+
+    fn ensureSpeciesPreviewRuntimeBinding layerNode legacyNode =
+    (
+        if layerNode == undefined do
+            throw "Species preview layer is undefined."
+        if legacyNode == undefined do
+            throw "Legacy Forest is undefined."
+
+        local sourceSpline = findForestAreaSpline legacyNode
+        if sourceSpline == undefined do
+            throw "Verified legacy Forest area spline was not found."
+
+        local layerSpline = findForestAreaSpline layerNode
+        local areaRebound = false
+        if layerSpline == undefined then
+        (
+            local areaIndex = addSplineIncludeArea layerNode sourceSpline
+            if not (verifySplineArea layerNode sourceSpline areaIndex) do
+                throw ("Species preview spline-area recovery failed: " + layerNode.name)
+            layerSpline = sourceSpline
+            areaRebound = true
+        )
+
+        if not (isProperty layerNode #cobjlist) do
+            throw ("Species preview geometry contract is unavailable: " + layerNode.name)
+        if layerNode.cobjlist.count < 1 or layerNode.cobjlist[1] == undefined do
+            throw ("Species preview geometry source is missing: " + layerNode.name)
+
+        local sourceNode = layerNode.cobjlist[1]
+        local beforeCount = getForestGeneratedItemCount layerNode
+        refreshForestPreviewNode layerNode
+        local afterCount = getForestGeneratedItemCount layerNode
+
+        #(sourceSpline, layerSpline, sourceNode, areaRebound, beforeCount, afterCount)
+    ),
+
     fn getSpeciesPreviewNodes =
     (
         local legacy = getNodeByName "FM_Forest_001"
@@ -3133,6 +3321,140 @@ struct ForestManagerBridgeState
         )
 
         #(legacy, layers)
+    ),
+
+    fn normalizeSpeciesDensityMapCoords coords =
+    (
+        if coords == undefined do
+            throw "Species Bitmaptexture coords are unavailable."
+
+        coords.realWorldScale = false
+        coords.U_Tiling = 1.0
+        coords.V_Tiling = 1.0
+        coords.U_Offset = 0.0
+        coords.V_Offset = 0.0
+        coords.U_Tile = false
+        coords.V_Tile = false
+
+        if coords.realWorldScale != false do throw "Normalized UV verification failed: realWorldScale."
+        if abs(coords.U_Tiling - 1.0) > 0.0001 do throw "Normalized UV verification failed: U_Tiling."
+        if abs(coords.V_Tiling - 1.0) > 0.0001 do throw "Normalized UV verification failed: V_Tiling."
+        if abs(coords.U_Offset) > 0.0001 do throw "Normalized UV verification failed: U_Offset."
+        if abs(coords.V_Offset) > 0.0001 do throw "Normalized UV verification failed: V_Offset."
+        if coords.U_Tile != false do throw "Normalized UV verification failed: U_Tile."
+        if coords.V_Tile != false do throw "Normalized UV verification failed: V_Tile."
+
+        true
+    ),
+
+    fn configureSpeciesDensityMapTilingCoords coords =
+    (
+        if coords == undefined do
+            throw "Species Bitmaptexture coords are unavailable."
+
+        -- Forest Pack Image Mode uses units_x/units_y as the physical size of
+        -- one distribution-map tile. Keep the protected 75 m Forest density
+        -- units and allow the map to repeat across the complete spline area.
+        coords.realWorldScale = false
+        coords.U_Tiling = 1.0
+        coords.V_Tiling = 1.0
+        coords.U_Offset = 0.0
+        coords.V_Offset = 0.0
+        coords.U_Tile = true
+        coords.V_Tile = true
+
+        if coords.realWorldScale != false do throw "Forest XY tile verification failed: realWorldScale."
+        if abs(coords.U_Tiling - 1.0) > 0.0001 do throw "Forest XY tile verification failed: U_Tiling."
+        if abs(coords.V_Tiling - 1.0) > 0.0001 do throw "Forest XY tile verification failed: V_Tiling."
+        if abs(coords.U_Offset) > 0.0001 do throw "Forest XY tile verification failed: U_Offset."
+        if abs(coords.V_Offset) > 0.0001 do throw "Forest XY tile verification failed: V_Offset."
+        if coords.U_Tile != true do throw "Forest XY tile verification failed: U_Tile."
+        if coords.V_Tile != true do throw "Forest XY tile verification failed: V_Tile."
+        true
+    ),
+
+    fn configureSpeciesMapProjectionJson =
+    (
+        local nodes = getSpeciesPreviewNodes()
+        local legacy = nodes[1]
+        local layers = nodes[2]
+        local splineNode = findForestAreaSpline legacy
+        if splineNode == undefined do throw "Verified Forest area spline was not found."
+
+        local oneMeter = 0.0
+        try (oneMeter = units.decodeValue "1m") catch (oneMeter = 0.0)
+        if oneMeter <= 0.0 do throw "Could not resolve active scene meter conversion."
+
+        local bb = nodeGetBoundingBox splineNode splineNode.transform
+        local pmin = bb[1]
+        local pmax = bb[2]
+        local centerX = (pmin.x + pmax.x) * 0.5
+        local centerY = (pmin.y + pmax.y) * 0.5
+
+        local oldOffsetX = #()
+        local oldOffsetY = #()
+        for layerNode in layers do
+        (
+            append oldOffsetX layerNode.offset_X
+            append oldOffsetY layerNode.offset_Y
+        )
+
+        try
+        (
+            for layerNode in layers do
+            (
+                if abs((layerNode.units_x / oneMeter) - 75.0) > 0.001 do
+                    throw ("Protected Density Units X is not 75.0 m on " + layerNode.name)
+                if abs((layerNode.units_y / oneMeter) - 75.0) > 0.001 do
+                    throw ("Protected Density Units Y is not 75.0 m on " + layerNode.name)
+                if layerNode.distmap == undefined do
+                    throw ("Distribution map is missing on " + layerNode.name)
+
+                local coords = undefined
+                try (coords = layerNode.distmap.coords) catch (coords = undefined)
+                if coords == undefined do
+                    throw ("Species Bitmaptexture coords are unavailable: " + layerNode.name)
+
+                configureSpeciesDensityMapTilingCoords coords
+                layerNode.offset_X = centerX
+                layerNode.offset_Y = centerY
+                refreshForestPreviewNode layerNode
+            )
+        )
+        catch
+        (
+            for i = 1 to layers.count do
+            (
+                try (layers[i].offset_X = oldOffsetX[i]) catch()
+                try (layers[i].offset_Y = oldOffsetY[i]) catch()
+            )
+            throw
+        )
+
+        local layersJson = "["
+        for i = 1 to layers.count do
+        (
+            if i > 1 do layersJson += ","
+            local layerNode = layers[i]
+            local coords = layerNode.distmap.coords
+            layersJson += "{\"forest_name\":" + (jsonString layerNode.name) +
+                          ",\"density_meters_x\":" + ((layerNode.units_x / oneMeter) as string) +
+                          ",\"density_meters_y\":" + ((layerNode.units_y / oneMeter) as string) +
+                          ",\"forest_offset_meters_x\":" + ((layerNode.offset_X / oneMeter) as string) +
+                          ",\"forest_offset_meters_y\":" + ((layerNode.offset_Y / oneMeter) as string) +
+                          ",\"u_tile\":" + (boolJson coords.U_Tile) +
+                          ",\"v_tile\":" + (boolJson coords.V_Tile) +
+                          ",\"real_world_scale\":" + (boolJson coords.realWorldScale) +
+                          ",\"verified\":true}"
+        )
+        layersJson += "]"
+
+        "{\"projection\":\"forest_xy_tiled_75m\"" +
+        ",\"spline_name\":" + (jsonString splineNode.name) +
+        ",\"spline_center_x_meters\":" + ((centerX / oneMeter) as string) +
+        ",\"spline_center_y_meters\":" + ((centerY / oneMeter) as string) +
+        ",\"layers\":" + layersJson +
+        ",\"verified\":true}"
     ),
 
     fn applySpeciesUvClampPreviewJson =
@@ -3195,6 +3517,10 @@ struct ForestManagerBridgeState
         local oldRealWorldScale = #()
         local oldRealWorldWidth = #()
         local oldRealWorldHeight = #()
+        local oldUTiling = #()
+        local oldVTiling = #()
+        local oldUOffset = #()
+        local oldVOffset = #()
         local layerCoords = #()
 
         for layerNode in layers do
@@ -3213,6 +3539,10 @@ struct ForestManagerBridgeState
             append oldRealWorldScale layerCoord.realWorldScale
             append oldRealWorldWidth layerCoord.realWorldWidth
             append oldRealWorldHeight layerCoord.realWorldHeight
+            append oldUTiling layerCoord.U_Tiling
+            append oldVTiling layerCoord.V_Tiling
+            append oldUOffset layerCoord.U_Offset
+            append oldVOffset layerCoord.V_Offset
         )
 
         try
@@ -3224,18 +3554,13 @@ struct ForestManagerBridgeState
 
             for layerCoord in layerCoords do
             (
-                layerCoord.realWorldScale = true
-                layerCoord.realWorldWidth = splineWidth
-                layerCoord.realWorldHeight = splineHeight
-                layerCoord.U_Tile = false
-                layerCoord.V_Tile = false
-
-                if layerCoord.realWorldScale != true do throw "Real-world UV scale verification failed."
-                if abs(layerCoord.realWorldWidth - splineWidth) > 0.001 do throw "Real-world UV width verification failed."
-                if abs(layerCoord.realWorldHeight - splineHeight) > 0.001 do throw "Real-world UV height verification failed."
-                if layerCoord.U_Tile != false do throw "U_Tile clamp verification failed."
-                if layerCoord.V_Tile != false do throw "V_Tile clamp verification failed."
+                normalizeSpeciesDensityMapCoords layerCoord
             )
+
+            local runtimeBinding = ensureSpeciesPreviewRuntimeBinding target legacy
+            local generatedItems = runtimeBinding[6]
+            if generatedItems <= 0 do
+                throw "Foreground species layer generated zero Forest items after UV clamp runtime binding verification."
 
             if legacy.disabled != true do throw "Legacy Forest preview state failed."
             if layers[1].disabled != false do throw "Foreground layer preview state failed."
@@ -3256,12 +3581,22 @@ struct ForestManagerBridgeState
                 try (layerCoords[i].realWorldScale = oldRealWorldScale[i]) catch()
                 try (layerCoords[i].realWorldWidth = oldRealWorldWidth[i]) catch()
                 try (layerCoords[i].realWorldHeight = oldRealWorldHeight[i]) catch()
+                try (layerCoords[i].U_Tiling = oldUTiling[i]) catch()
+                try (layerCoords[i].V_Tiling = oldVTiling[i]) catch()
+                try (layerCoords[i].U_Offset = oldUOffset[i]) catch()
+                try (layerCoords[i].V_Offset = oldVOffset[i]) catch()
             )
             try (legacy.disabled = oldLegacyDisabled) catch()
             for i = 1 to layers.count do
                 try (layers[i].disabled = oldLayerDisabled[i]) catch()
             throw
         )
+
+        local finalBinding = ensureSpeciesPreviewRuntimeBinding target legacy
+        local finalSpline = finalBinding[2]
+        local finalSource = finalBinding[3]
+        local finalAreaRebound = finalBinding[4]
+        local finalGeneratedItems = finalBinding[6]
 
         "{\"mode\":\"uv_clamp_visual_preview\"" +
         ",\"forest_name\":" + (jsonString target.name) +
@@ -3270,15 +3605,25 @@ struct ForestManagerBridgeState
                 then jsonString target.cobjlist[1].name else "\"\"") +
         ",\"u_tile\":false" +
         ",\"v_tile\":false" +
-        ",\"real_world_scale\":true" +
-        ",\"real_world_width_meters\":" + ((splineWidth / oneMeter) as string) +
-        ",\"real_world_height_meters\":" + ((splineHeight / oneMeter) as string) +
+        ",\"real_world_scale\":false" +
+        ",\"uv_mapping\":\"forest_xy_tiled_75m\"" +
+        ",\"u_tiling\":1.0" +
+        ",\"v_tiling\":1.0" +
+        ",\"u_offset\":0.0" +
+        ",\"v_offset\":0.0" +
+        ",\"area_width_meters\":" + ((splineWidth / oneMeter) as string) +
+        ",\"area_height_meters\":" + ((splineHeight / oneMeter) as string) +
         ",\"spline_name\":" + (jsonString sourceSpline.name) +
         ",\"density_meters_x\":" + ((target.units_x / oneMeter) as string) +
         ",\"density_meters_y\":" + ((target.units_y / oneMeter) as string) +
         ",\"legacy_forest_disabled\":true" +
         ",\"only_foreground_layer_active\":true" +
+        ",\"area_node\":" + (jsonString finalSpline.name) +
+        ",\"source_node\":" + (jsonString finalSource.name) +
+        ",\"area_rebound\":" + (boolJson finalAreaRebound) +
+        ",\"generated_items\":" + (finalGeneratedItems as string) +
         ",\"transactional\":true" +
+        ",\"viewport_refresh\":true" +
         ",\"verified\":true}"
     ),
 
@@ -3402,6 +3747,21 @@ struct ForestManagerBridgeState
             for i = 1 to layers.count do
                 layers[i].disabled = (i != layerIndex)
 
+            for layerNode in layers do
+            (
+                if layerNode.distmap != undefined do
+                (
+                    local previewCoords = undefined
+                    try (previewCoords = layerNode.distmap.coords) catch (previewCoords = undefined)
+                    if previewCoords != undefined do normalizeSpeciesDensityMapCoords previewCoords
+                )
+            )
+
+            local runtimeBinding = ensureSpeciesPreviewRuntimeBinding layers[layerIndex] legacy
+            local generatedItems = runtimeBinding[6]
+            if generatedItems <= 0 do
+                throw ("Active species layer generated zero Forest items after runtime binding verification: " + layers[layerIndex].name)
+
             if legacy.disabled != true do
                 throw "Legacy Forest did not enter disabled preview state."
 
@@ -3445,14 +3805,131 @@ struct ForestManagerBridgeState
         )
         layersJson += "]"
 
+        local activeBinding = ensureSpeciesPreviewRuntimeBinding layers[layerIndex] legacy
+        local activeSpline = activeBinding[2]
+        local activeSource = activeBinding[3]
+        local activeAreaRebound = activeBinding[4]
+        local activeGeneratedItems = activeBinding[6]
+
         "{\"mode\":\"single_layer_visual_preview\"" +
         ",\"active_layer_index\":" + (layerIndex as string) +
         ",\"legacy_forest\":" + (jsonString legacy.name) +
         ",\"legacy_forest_disabled\":" + (boolJson legacy.disabled) +
         ",\"layers\":" + layersJson +
         ",\"density_units_preserved\":true" +
+        ",\"uv_mapping\":\"normalized_area_0_1\"" +
+        ",\"real_world_scale\":false" +
+        ",\"area_node\":" + (jsonString activeSpline.name) +
+        ",\"source_node\":" + (jsonString activeSource.name) +
+        ",\"area_rebound\":" + (boolJson activeAreaRebound) +
+        ",\"generated_items\":" + (activeGeneratedItems as string) +
         ",\"transactional\":true" +
+        ",\"viewport_refresh\":true" +
         ",\"verified\":true}"
+    ),
+
+    fn activateAllSpeciesLayersPreviewJson =
+    (
+        local nodes = getSpeciesPreviewNodes()
+        local legacy = nodes[1]
+        local layers = nodes[2]
+
+        local oneMeter = 0.0
+        try (oneMeter = units.decodeValue "1m") catch (oneMeter = 0.0)
+        if oneMeter <= 0.0 do throw "Could not resolve active scene meter conversion."
+
+        local oldLegacyDisabled = legacy.disabled
+        local oldLayerDisabled = #()
+        for layerNode in layers do append oldLayerDisabled layerNode.disabled
+
+        try
+        (
+            legacy.disabled = true
+
+            for layerNode in layers do
+            (
+                if abs((layerNode.units_x / oneMeter) - 75.0) > 0.001 do
+                    throw ("Protected Density Units X is not 75.0 m on " + layerNode.name)
+                if abs((layerNode.units_y / oneMeter) - 75.0) > 0.001 do
+                    throw ("Protected Density Units Y is not 75.0 m on " + layerNode.name)
+                if layerNode.distmap == undefined do
+                    throw ("Distribution map is missing on " + layerNode.name)
+                if layerNode.densityMap != true do
+                    throw ("Density Map mode is not enabled on " + layerNode.name)
+                if layerNode.distmode != 0 do
+                    throw ("Image distribution mode is not active on " + layerNode.name)
+
+                local coords = undefined
+                try (coords = layerNode.distmap.coords) catch (coords = undefined)
+                if coords == undefined do
+                    throw ("Species Bitmaptexture coords are unavailable: " + layerNode.name)
+                configureSpeciesDensityMapTilingCoords coords
+
+                layerNode.disabled = false
+            )
+
+            if legacy.disabled != true do throw "Legacy Forest did not enter disabled composition state."
+
+            local totalGeneratedItems = 0
+            for layerNode in layers do
+            (
+                local runtimeBinding = ensureSpeciesPreviewRuntimeBinding layerNode legacy
+                local generatedItems = runtimeBinding[6]
+                if generatedItems <= 0 do
+                    throw ("Species composition layer generated zero Forest items: " + layerNode.name)
+                totalGeneratedItems += generatedItems
+                if layerNode.disabled != false do
+                    throw ("Species composition layer did not remain active: " + layerNode.name)
+            )
+
+            local layersJson = "["
+            for i = 1 to layers.count do
+            (
+                if i > 1 do layersJson += ","
+                local layerNode = layers[i]
+                local sourceNode = layerNode.cobjlist[1]
+                local runtimeBinding = ensureSpeciesPreviewRuntimeBinding layerNode legacy
+                local layerSpline = runtimeBinding[2]
+                local generatedItems = runtimeBinding[6]
+
+                layersJson += "{\"index\":" + (i as string) +
+                              ",\"forest_name\":" + (jsonString layerNode.name) +
+                              ",\"source_name\":" + (jsonString sourceNode.name) +
+                              ",\"area_node\":" + (jsonString layerSpline.name) +
+                              ",\"density_meters_x\":" + ((layerNode.units_x / oneMeter) as string) +
+                              ",\"density_meters_y\":" + ((layerNode.units_y / oneMeter) as string) +
+                              ",\"generated_items\":" + (generatedItems as string) +
+                              ",\"active\":true" +
+                              ",\"verified\":true}"
+            )
+            layersJson += "]"
+
+            refreshForestPreviewNode layers[1]
+            refreshForestPreviewNode layers[2]
+            refreshForestPreviewNode layers[3]
+
+            "{\"mode\":\"three_layer_species_composition\"" +
+            ",\"legacy_forest\":" + (jsonString legacy.name) +
+            ",\"legacy_forest_disabled\":true" +
+            ",\"all_species_layers_active\":true" +
+            ",\"uv_mapping\":\"normalized_area_0_1\"" +
+            ",\"real_world_scale\":false" +
+            ",\"density_meters_x\":75.0" +
+            ",\"density_meters_y\":75.0" +
+            ",\"layer_count\":3" +
+            ",\"total_generated_items\":" + (totalGeneratedItems as string) +
+            ",\"layers\":" + layersJson +
+            ",\"viewport_refresh\":true" +
+            ",\"transactional\":true" +
+            ",\"verified\":true}"
+        )
+        catch
+        (
+            try (legacy.disabled = oldLegacyDisabled) catch()
+            for i = 1 to layers.count do
+                try (layers[i].disabled = oldLayerDisabled[i]) catch()
+            throw
+        )
     ),
 
     fn rollbackSpeciesLayerPreviewJson =
@@ -4289,6 +4766,7 @@ struct ForestManagerBridgeState
                     throw ("Source geometry is undefined at index " + (i as string))
 
                 local layerForest = ::Forest_Pro()
+                setForestPointCloudDisplay layerForest
                 append created layerForest
 
                 layerForest.name = layerNames[i]
@@ -5581,6 +6059,32 @@ struct ForestManagerBridgeState
             )
         )
 
+        if command == "CONFIGURE_SPECIES_MAP_PROJECTION" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"CONFIGURE_SPECIES_MAP_PROJECTION\",\"data\":" +
+                       configureSpeciesMapProjectionJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "CONFIGURE_SPECIES_MAP_PROJECTION" (getCurrentException())
+            )
+        )
+
+        if command == "ACTIVATE_ALL_SPECIES_LAYERS" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"ACTIVATE_ALL_SPECIES_LAYERS\",\"data\":" +
+                       activateAllSpeciesLayersPreviewJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "ACTIVATE_ALL_SPECIES_LAYERS" (getCurrentException())
+            )
+        )
+
         if command == "ROLLBACK_SPECIES_LAYER_PREVIEW" then
         (
             try
@@ -5604,6 +6108,19 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "GET_SPECIES_MASK_DEEP_UVGEN_CONTRACT" (getCurrentException())
+            )
+        )
+
+        if command == "GET_FOREST_AREA_POLYGON" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"GET_FOREST_AREA_POLYGON\",\"data\":" +
+                       getForestAreaPolygonJson samples:256 + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "GET_FOREST_AREA_POLYGON" (getCurrentException())
             )
         )
 
@@ -5900,6 +6417,19 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "SET_GEOMETRY_PROBABILITIES" (getCurrentException())
+            )
+        )
+
+        if command == "SET_ALL_FOREST_POINT_CLOUD" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"SET_ALL_FOREST_POINT_CLOUD\",\"data\":" +
+                       setAllForestPointCloudJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "SET_ALL_FOREST_POINT_CLOUD" (getCurrentException())
             )
         )
 
