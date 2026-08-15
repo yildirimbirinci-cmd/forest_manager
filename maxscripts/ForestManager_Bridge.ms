@@ -50,7 +50,8 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.9.39\"}"
+        ",\"bridge_version\":\"0.9.41\"" +
+        ",\"bridge_build_id\":\"stage5d25-density-restartsafe-20260815a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -594,6 +595,117 @@ struct ForestManagerBridgeState
         result
     ),
 
+    fn getAutoRenameBaseName nodeName =
+    (
+        local value = nodeName as string
+        if value.count <= 3 do return value
+
+        local tail = substring value (value.count - 2) 3
+        local allDigits = true
+        for i = 1 to 3 while allDigits do
+        (
+            local ch = substring tail i 1
+            if (findString "0123456789" ch) == undefined do allDigits = false
+        )
+
+        if allDigits then
+            substring value 1 (value.count - 3)
+        else
+            value
+    ),
+
+    fn getNodeBoundingSize node =
+    (
+        if node == undefined do return undefined
+
+        local result = undefined
+        try
+        (
+            local bb = nodeGetBoundingBox node node.transform
+            local delta = bb[2] - bb[1]
+            result = #(abs delta.x, abs delta.y, abs delta.z)
+        )
+        catch()
+        result
+    ),
+
+    fn dimensionsApproximatelyMatch a b =
+    (
+        if a == undefined or b == undefined do return false
+        if a.count != 3 or b.count != 3 do return false
+
+        for i = 1 to 3 do
+        (
+            local scale = amax (abs a[i]) (abs b[i])
+            local tolerance = amax 0.01 (scale * 0.005)
+            if abs (a[i] - b[i]) > tolerance do return false
+        )
+        true
+    ),
+
+    fn isReferenceLayerNode node =
+    (
+        if node == undefined do return false
+
+        local result = false
+        try
+        (
+            local nodeLayer = node.layer
+            if nodeLayer != undefined do result = (nodeLayer.name == "FM_References")
+        )
+        catch()
+        result
+    ),
+
+    fn collectLegacyAutoRenameSiblings legacySourceNodes =
+    (
+        local result = #()
+
+        for sourceNode in legacySourceNodes do
+        (
+            if sourceNode != undefined do
+            (
+                -- Only use a source as a migration witness when current Forest
+                -- Manager ownership is provable. This prevents name-only
+                -- deletion of unrelated user scene objects.
+                local managedWitness = isForestManagerOwnedNode sourceNode or isReferenceLayerNode sourceNode
+                if managedWitness do
+                (
+                    local baseName = getAutoRenameBaseName sourceNode.name
+                    local sourceClass = ""
+                    local sourceSize = getNodeBoundingSize sourceNode
+                    try (sourceClass = (classOf sourceNode) as string) catch()
+
+                    for candidate in objects do
+                    (
+                        if candidate != undefined and
+                           candidate != sourceNode and
+                           not (isForestManagerOwnedNode candidate) then
+                        (
+                            local candidateBase = getAutoRenameBaseName candidate.name
+                            if candidateBase == baseName do
+                            (
+                                local candidateClass = ""
+                                try (candidateClass = (classOf candidate) as string) catch()
+
+                                if candidateClass == sourceClass do
+                                (
+                                    local candidateSize = getNodeBoundingSize candidate
+                                    if dimensionsApproximatelyMatch sourceSize candidateSize do
+                                    (
+                                        if (findItem result candidate) == 0 do append result candidate
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            )
+        )
+
+        result
+    ),
+
     fn deleteManagedReferenceNodes legacySourceNodes:#() =
     (
         local deleteNodes = collectOwnedReferenceLayerNodes()
@@ -603,6 +715,17 @@ struct ForestManagerBridgeState
         -- remove because they are explicit cobjlist references of the managed
         -- Forest object.
         for node in legacySourceNodes do
+        (
+            if node != undefined and (findItem deleteNodes node) == 0 do
+                append deleteNodes node
+        )
+
+        -- Migration cleanup for failed pre-idempotency runs. A sibling is
+        -- accepted only when an actively managed Forest source proves the
+        -- asset family and the sibling matches canonical name, class and
+        -- bounding dimensions. Name alone is never enough.
+        local legacySiblings = collectLegacyAutoRenameSiblings legacySourceNodes
+        for node in legacySiblings do
         (
             if node != undefined and (findItem deleteNodes node) == 0 do
                 append deleteNodes node
@@ -1876,6 +1999,33 @@ struct ForestManagerBridgeState
         true
     ),
 
+    fn raiseBridgeError message =
+    (
+        throw message
+    ),
+
+    fn currentExceptionDetails prefix =
+    (
+        local message = ""
+        local stackText = ""
+        local sourceFile = ""
+        local sourceLine = 0
+
+        try (message = getCurrentException()) catch()
+        try (stackText = getCurrentExceptionStackTrace()) catch()
+        try (sourceFile = getErrorSourceFileName()) catch()
+        try (sourceLine = getErrorSourceFileLine()) catch()
+
+        local details = prefix + message
+        if sourceFile != undefined and sourceFile != "" do
+            details += " | source=" + sourceFile
+        if sourceLine != undefined and sourceLine > 0 do
+            details += " | line=" + (sourceLine as string)
+        if stackText != undefined and stackText != "" do
+            details += " | stack=" + stackText
+        details
+    ),
+
     fn mergeT2AssetAndBindJson assetPath =
     (
         if assetPath == undefined or assetPath == "" do
@@ -1901,17 +2051,43 @@ struct ForestManagerBridgeState
 
         clearSelection()
 
-        local mergeResult = mergeMAXFile assetPath #select #autoRenameDups #useMergedMtlDups quiet:true
+        local mergeResult = false
+        try
+        (
+            mergeResult = mergeMAXFile assetPath #select #autoRenameDups #useMergedMtlDups quiet:true
+        )
+        catch
+        (
+            raiseBridgeError (currentExceptionDetails "MERGE_STEP[mergeMAXFile]: ")
+        )
 
         local afterObjects = objects as array
         local newObjects = for obj in afterObjects where (findItem beforeObjects obj) == 0 collect obj
 
         if newObjects.count < 1 do
-            throw "T2 asset merge produced no new scene nodes."
+            throw "MERGE_STEP[newObjects]: T2 asset merge produced no new scene nodes."
 
-        local sourceNode = chooseMergedSourceNode newObjects expectedSourceName:expectedSourceName
+        local refLayer = getOrCreateReferenceLayer()
+        for obj in newObjects do
+        (
+            markForestManagerOwnedNode obj role:"merged_asset_node"
+            try (refLayer.addNode obj) catch()
+        )
+        try (refLayer.on = false) catch()
+
+        local sourceNode = undefined
+        try
+        (
+            sourceNode = chooseMergedSourceNode newObjects expectedSourceName:expectedSourceName
+        )
+        catch
+        (
+            raiseBridgeError ("MERGE_STEP[chooseMergedSourceNode]: " + (getCurrentException()))
+        )
         if sourceNode == undefined do
-            throw "Could not choose a Forest source from merged nodes."
+            throw "MERGE_STEP[chooseMergedSourceNode]: Could not choose a Forest source from merged nodes."
+
+        try (sourceNode.name = expectedSourceName) catch()
 
         -- Match T2's existing merge behavior for top-level assets.
         if sourceNode.parent == undefined do
@@ -1919,9 +2095,24 @@ struct ForestManagerBridgeState
             try (sourceNode.position = [0,0,0]) catch()
         )
 
-        prepareReferenceNode sourceNode
+        try
+        (
+            prepareReferenceNode sourceNode
+        )
+        catch
+        (
+            raiseBridgeError ("MERGE_STEP[prepareReferenceNode]: " + (getCurrentException()))
+        )
 
-        local dimensions = bindForestGeometrySource forestNode sourceNode
+        local dimensions = undefined
+        try
+        (
+            dimensions = bindForestGeometrySource forestNode sourceNode
+        )
+        catch
+        (
+            raiseBridgeError ("MERGE_STEP[bindForestGeometrySource]: " + (getCurrentException()))
+        )
 
         local splineNode = findForestAreaSpline forestNode
         if splineNode != undefined and
@@ -2354,6 +2545,8 @@ struct ForestManagerBridgeState
             ",\"one_meter_system_units\":" + (oneMeterSystemUnits as string) +
             ",\"density_system_units\":" + (densitySystemUnits as string) +
             ",\"density_display_value\":" + (jsonString densityDisplayValue) +
+            ",\"density_meters_x\":" + ((forestNode.units_x / oneMeterSystemUnits) as string) +
+            ",\"density_meters_y\":" + ((forestNode.units_y / oneMeterSystemUnits) as string) +
             ",\"display_type\":" + (jsonString (units.DisplayType as string)) +
             ",\"display_unit\":" + (jsonString (getDisplayUnitName())) +
             ",\"system_type\":" + (jsonString (units.SystemType as string)) +
@@ -2565,10 +2758,18 @@ struct ForestManagerBridgeState
 
         local beforeObjects = objects as array
         clearSelection()
-        mergeMAXFile assetPath #select #autoRenameDups #useMergedMtlDups quiet:true
+        local mergeResult = false
+        try
+        (
+            mergeResult = mergeMAXFile assetPath #select #autoRenameDups #useMergedMtlDups quiet:true
+        )
+        catch
+        (
+            raiseBridgeError (currentExceptionDetails "APPEND_STEP[mergeMAXFile]: ")
+        )
         local afterObjects = objects as array
         local newObjects = for obj in afterObjects where (findItem beforeObjects obj) == 0 collect obj
-        if newObjects.count < 1 do throw "T2 asset merge produced no new scene nodes."
+        if newObjects.count < 1 do throw "APPEND_STEP[newObjects]: T2 asset merge produced no new scene nodes."
 
         local refLayer = getOrCreateReferenceLayer()
         for obj in newObjects do
@@ -2580,6 +2781,8 @@ struct ForestManagerBridgeState
 
         local sourceNode = chooseMergedSourceNode newObjects expectedSourceName:expectedSourceName
         if sourceNode == undefined do throw "Could not choose a Forest source from merged nodes."
+
+        try (sourceNode.name = expectedSourceName) catch()
 
         local selectedClassName = ""
         try (selectedClassName = toLower ((classOf sourceNode) as string)) catch()
@@ -2606,11 +2809,26 @@ struct ForestManagerBridgeState
 
         if sourceNode.parent == undefined do (try (sourceNode.position = [0,0,0]) catch())
 
-        prepareReferenceNode sourceNode
+        try
+        (
+            prepareReferenceNode sourceNode
+        )
+        catch
+        (
+            raiseBridgeError ("APPEND_STEP[prepareReferenceNode]: " + (getCurrentException()))
+        )
 
         local currentCount = if isProperty forestNode #cobjlist then forestNode.cobjlist.count else 0
         local newIndex = currentCount + 1
-        local dimensions = setGeometryItemAtIndex forestNode newIndex sourceNode probabilityValue
+        local dimensions = undefined
+        try
+        (
+            dimensions = setGeometryItemAtIndex forestNode newIndex sourceNode probabilityValue
+        )
+        catch
+        (
+            raiseBridgeError ("APPEND_STEP[setGeometryItemAtIndex]: " + (getCurrentException()))
+        )
         equalizeGeometryProbabilities forestNode
 
         if isProperty forestNode #units_x do forestNode.units_x = 45000.0
