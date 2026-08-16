@@ -135,9 +135,9 @@ def test_scalar_families_write_verify_and_rollback(bridge):
 
 def test_read_only_array_and_curve_properties_are_rejected_before_write(bridge):
     service = ForestPackControlService()
-    with pytest.raises(ForestControlError, match="not scalar writable"):
+    with pytest.raises(ForestControlError, match="not writable by a verified endpoint"):
         service.set_property("FM_Forest_001", "cobjlist", 1)
-    with pytest.raises(ForestControlError, match="not scalar writable"):
+    with pytest.raises(ForestControlError, match="not writable by a verified endpoint"):
         service.set_property("FM_Forest_001", "falloff", 1.0)
     with pytest.raises(ForestControlError, match="explicitly read-only"):
         service.set_property("FM_Forest_001", "fastopac", True)
@@ -160,8 +160,11 @@ def test_bridge_contract_exposes_stage61_commands_and_build_identity():
     assert "FOREST_CONTROL_GET_PROPERTY" in bridge_text
     assert "FOREST_CONTROL_SET_SCALAR" in bridge_text
     assert "forestControlExplicitReadOnly" in bridge_text
-    assert "stage6-1-general-scalar-write-20260816b" in bridge_text
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage6-1-general-scalar-write-20260816b"' in runtime_text
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime_text
+    build_line = next(line for line in runtime_text.splitlines() if line.startswith("EXPECTED_BRIDGE_BUILD_ID = "))
+    build_id = build_line.split('"', 2)[1]
+    assert build_id.startswith("stage6-")
+    assert build_id in bridge_text
 
 
 def test_existing_semantic_transaction_stack_uses_new_write_endpoint(bridge):

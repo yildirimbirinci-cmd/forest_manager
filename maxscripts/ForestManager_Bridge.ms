@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-1-general-scalar-write-20260816b\"}"
+        ",\"bridge_build_id\":\"stage6-2-typed-color-write-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -3248,6 +3248,9 @@ struct ForestManagerBridgeState
         if valueClass == "Point2" or valueClass == "Point3" or valueClass == "Point4" then
             return (jsonString (value as string))
 
+        if valueClass == "Color" then
+            return ("[" + (value.r as string) + "," + (value.g as string) + "," + (value.b as string) + "]")
+
         if valueClass == "String" then
             return (jsonString value)
 
@@ -6175,6 +6178,44 @@ struct ForestManagerBridgeState
         ",\"verified\":true}"
     ),
 
+    fn forestControlSetColorJson forestName propertyName redValue greenValue blueValue =
+    (
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        if forestControlExplicitReadOnly propertyName do throw ("Forest control property is explicitly read-only: " + propertyName)
+
+        local beforeValue = undefined
+        local readOk = true
+        try (beforeValue = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control property is unreadable: " + propertyName)
+        local beforeClass = safeClassName beforeValue
+        if beforeClass != "Color" do throw ("Forest control property is not Color writable: " + propertyName + " class=" + beforeClass)
+
+        if redValue < 0.0 or redValue > 255.0 or greenValue < 0.0 or greenValue > 255.0 or blueValue < 0.0 or blueValue > 255.0 do
+            throw "Forest control Color channels must be within 0..255."
+
+        local beforeJson = safePropertyValueJson forestNode propName
+        local targetValue = color redValue greenValue blueValue
+        setProperty forestNode propName targetValue
+
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = getProperty forestNode propName) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control Color readback failed: " + propertyName)
+        local afterClass = safeClassName afterValue
+        if afterClass != "Color" do throw ("Forest control Color readback class mismatch: " + propertyName + " class=" + afterClass)
+        if (abs (afterValue.r - redValue)) > 0.001 or (abs (afterValue.g - greenValue)) > 0.001 or (abs (afterValue.b - blueValue)) > 0.001 do
+            throw ("Forest control Color readback mismatch: " + propertyName)
+
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"value_class\":\"Color\"" +
+        ",\"color_type\":\"rgb_0_255\"" +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + safePropertyValueJson forestNode propName +
+        ",\"verified\":true}"
+    ),
+
     fn handleCommand rawCommand =
     (
         local cleanCommand = trimLeft (trimRight rawCommand)
@@ -6231,6 +6272,24 @@ struct ForestManagerBridgeState
             )
         )
 
+        if matchPattern command pattern:"FOREST_CONTROL_SET_COLOR|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FOREST_CONTROL_SET_COLOR requires forest, property and RGB channels."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local redValue = parts[4] as float
+                local greenValue = parts[5] as float
+                local blueValue = parts[6] as float
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_COLOR\",\"data\":" + forestControlSetColorJson forestName propertyName redValue greenValue blueValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_COLOR" (getCurrentException())
+            )
+        )
         if command == "FOREST_CONTROL_DISCOVER" then
         (
             try

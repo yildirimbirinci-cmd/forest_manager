@@ -89,7 +89,7 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Forest Pack discovery plus Stage 6.1 verified scalar write/rollback endpoints."""
+    """Forest Pack discovery plus verified scalar/color write and rollback endpoints."""
 
     EXPLICIT_RUNTIME_READ_ONLY = {"geomtexid", "fastopac", "renderid", "divtmap", "geomtex"}
     SCALAR_CLASS_FAMILIES = {
@@ -137,6 +137,29 @@ class ForestPackControlService(ForestControlService):
             except (TypeError, ValueError):
                 return False
         return type(actual) is type(expected) and actual == expected
+
+    @staticmethod
+    def _normalize_color(value: Any) -> tuple[float, float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ForestControlError("Color property requires an RGB list/tuple with exactly 3 numeric channels.")
+        channels: list[float] = []
+        for channel in value:
+            if isinstance(channel, bool) or not isinstance(channel, (int, float)):
+                raise ForestControlError("Color property requires numeric RGB channels.")
+            numeric = float(channel)
+            if numeric < 0.0 or numeric > 255.0:
+                raise ForestControlError("Color channels must be within 0..255.")
+            channels.append(numeric)
+        return tuple(channels)
+
+    @classmethod
+    def _colors_match(cls, actual: Any, expected: Any) -> bool:
+        try:
+            actual_rgb = cls._normalize_color(actual)
+            expected_rgb = cls._normalize_color(expected)
+        except ForestControlError:
+            return False
+        return all(abs(a - b) <= 1e-4 for a, b in zip(actual_rgb, expected_rgb))
 
     def get_property(self, forest_name: str, property_name: str, *, preflight: bool = True) -> dict[str, Any]:
         if preflight:
@@ -187,31 +210,72 @@ class ForestPackControlService(ForestControlService):
             "verified": True,
         }
 
+    def _send_color(
+        self,
+        forest_name: str,
+        property_name: str,
+        value: list[float] | tuple[float, float, float],
+        *,
+        preflight: bool,
+    ) -> dict[str, Any]:
+        if preflight:
+            ensure_current_bridge()
+        rgb = self._normalize_color(value)
+        command = "|".join((
+            "FOREST_CONTROL_SET_COLOR",
+            self._token(forest_name),
+            self._token(property_name),
+            repr(rgb[0]),
+            repr(rgb[1]),
+            repr(rgb[2]),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_SET_COLOR")
+        if data.get("verified") is not True:
+            raise ForestControlError(f"Forest color write was not verified: {forest_name}.{property_name}")
+        readback = self.get_property(forest_name, property_name, preflight=False)
+        if not self._colors_match(readback.get("value"), rgb):
+            raise ForestControlError(f"Forest color readback mismatch: {forest_name}.{property_name}")
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "value_class": "Color",
+            "color_type": "rgb_0_255",
+            "before_value": data.get("before_value"),
+            "after_value": readback.get("value"),
+            "verified": True,
+        }
+
     def set_property(
         self,
         forest_name: str,
         property_name: str,
-        value: bool | int | float | str,
+        value: Any,
         *,
         preflight: bool = True,
     ) -> dict[str, Any]:
         if property_name.lower() in self.EXPLICIT_RUNTIME_READ_ONLY:
             raise ForestControlError(f"Forest property is explicitly read-only: {property_name}")
         before = self.get_property(forest_name, property_name, preflight=preflight)
-        if str(before.get("write_mode") or "") != "scalar":
-            raise ForestControlError(
-                f"Forest property is not scalar writable: {forest_name}.{property_name} "
-                f"class={before.get('value_class')} mode={before.get('write_mode')}"
-            )
+        write_mode = str(before.get("write_mode") or "")
         value_class = str(before.get("value_class") or "")
-        self._scalar_type_for(value_class, value)
-        result = self._send_scalar(
-            forest_name, property_name, value, value_class=value_class, preflight=False
-        )
+        if write_mode == "scalar":
+            self._scalar_type_for(value_class, value)
+            result = self._send_scalar(
+                forest_name, property_name, value, value_class=value_class, preflight=False
+            )
+        elif write_mode == "color" and value_class == "Color":
+            self._normalize_color(value)
+            result = self._send_color(forest_name, property_name, value, preflight=False)
+        else:
+            raise ForestControlError(
+                f"Forest property is not writable by a verified endpoint: {forest_name}.{property_name} "
+                f"class={value_class} mode={write_mode}"
+            )
         self._rollback_journal.append({
             "forest_name": forest_name,
             "property_name": property_name,
             "value_class": value_class,
+            "write_mode": write_mode,
             "value": before.get("value"),
         })
         return result
@@ -224,13 +288,21 @@ class ForestPackControlService(ForestControlService):
         restored = 0
         try:
             for entry in pending:
-                result = self._send_scalar(
-                    str(entry["forest_name"]),
-                    str(entry["property_name"]),
-                    entry["value"],
-                    value_class=str(entry["value_class"]),
-                    preflight=(restored == 0),
-                )
+                if str(entry.get("write_mode") or "scalar") == "color":
+                    result = self._send_color(
+                        str(entry["forest_name"]),
+                        str(entry["property_name"]),
+                        entry["value"],
+                        preflight=(restored == 0),
+                    )
+                else:
+                    result = self._send_scalar(
+                        str(entry["forest_name"]),
+                        str(entry["property_name"]),
+                        entry["value"],
+                        value_class=str(entry["value_class"]),
+                        preflight=(restored == 0),
+                    )
                 results.append({
                     "forest_name": entry["forest_name"],
                     "property_name": entry["property_name"],
