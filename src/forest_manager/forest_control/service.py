@@ -87,7 +87,7 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Stage 5D.34 compatibility facade over the verified read-only discovery core."""
+    """Compatibility facade over the verified read-only Forest Pack discovery core."""
 
     def list_forests(self, *, preflight: bool = True) -> tuple[str, ...]:
         return tuple(snapshot.forest_name for snapshot in self.discover(preflight=preflight))
@@ -146,6 +146,23 @@ class ForestPackControlService(ForestControlService):
             f"Forest property not found in discovery payload: {forest_name}.{property_name}"
         )
 
+    def curve_points(self, forest_name: str, property_name: str, *, preflight: bool = True) -> dict[str, Any]:
+        metadata = self.curve_metadata(forest_name, property_name, preflight=preflight)
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "value_class": "CurveControl",
+            "readable": bool(metadata.get("readable")),
+            "curve_count": 0,
+            "curves": [],
+            "point_api_supported": False,
+            "point_read_supported": False,
+            "point_write_supported": False,
+            "point_count_change_supported": False,
+            "reason": "Forest Pack CurveControl is opaque in the verified runtime; direct point/controller API is not exposed.",
+            "verified": True,
+        }
+
 
 def aggregate_capability_matrix(snapshots: tuple[ForestSnapshot, ...]) -> dict[str, Any]:
     aggregate = {"read_only": 0, "scalar": 0, "color": 0}
@@ -179,7 +196,7 @@ def aggregate_capability_matrix(snapshots: tuple[ForestSnapshot, ...]) -> dict[s
             "color": "read_write_transactional",
             "array_parameter": "typed_discovery_read_only",
             "node_material_reference_arrays": "read_only_until_specialized_adapter",
-            "curve_control": "read_only_until_specialized_adapter",
+            "curve_control": "read_only_verified_runtime_boundary",
         },
         "verified": bool(snapshots),
     }
