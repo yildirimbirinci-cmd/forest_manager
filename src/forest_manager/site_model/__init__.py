@@ -10,6 +10,12 @@ from .semantic_classification import (
     SemanticClassification,
     SemanticClassificationPipeline,
 )
+from .planting_planning import (
+    PlantingDirective,
+    PlantingIntentKind,
+    PlantingPlan,
+    PlantingPlanningService,
+)
 from .file_ingestion import ProjectFileImportResult, ProjectFileIngestionService
 from .file_readers import (
     CadFileReader,
@@ -57,6 +63,10 @@ __all__ = [
     "IngestionResult",
     "ParsedPrimitive",
     "ParserAdapterError",
+    "PlantingDirective",
+    "PlantingIntentKind",
+    "PlantingPlan",
+    "PlantingPlanningService",
     "PdfFileReader",
     "PdfParserAdapter",
     "ProjectFileImportResult",
