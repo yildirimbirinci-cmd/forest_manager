@@ -1,3 +1,9 @@
+from .semantic_classification import (
+    ArtistFeedbackRule,
+    SemanticAnalysisResult,
+    SemanticClassification,
+    SemanticClassificationPipeline,
+)
 from .file_ingestion import ProjectFileImportResult, ProjectFileIngestionService
 from .file_readers import (
     CadFileReader,
@@ -54,6 +60,10 @@ __all__ = [
     "ProjectSourceKind",
     "ReaderBackendStatus",
     "SemanticAnnotation",
+    "SemanticAnalysisResult",
+    "SemanticClassification",
+    "SemanticClassificationPipeline",
+    "ArtistFeedbackRule",
     "SemanticRole",
     "SiteGeometry",
     "SiteModelError",

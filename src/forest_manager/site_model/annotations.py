@@ -49,6 +49,8 @@ def make_ai_annotation(
     confidence: float | None = None,
     label: str = "",
     notes: str = "",
+    reason: str = "",
+    evidence: tuple[str, ...] = (),
     revision: int = 1,
 ) -> SemanticAnnotation:
     return SemanticAnnotation(
@@ -58,6 +60,8 @@ def make_ai_annotation(
         confidence=confidence,
         label=label,
         notes=notes,
+        reason=reason,
+        evidence=evidence,
         revision=revision,
     )
 

@@ -25,6 +25,8 @@ class ViewerGeometryRecord:
     confidence: float | None
     label: str
     notes: str
+    reason: str
+    evidence: tuple[str, ...]
     artist_confirmed: bool
     metadata: dict[str, Any]
 
@@ -69,6 +71,8 @@ class SiteModelViewerAdapter:
                     confidence=None if annotation is None else annotation.confidence,
                     label="" if annotation is None else annotation.label,
                     notes="" if annotation is None else annotation.notes,
+                    reason="" if annotation is None else annotation.reason,
+                    evidence=() if annotation is None else annotation.evidence,
                     artist_confirmed=False if annotation is None else annotation.artist_confirmed,
                     metadata=metadata,
                 )

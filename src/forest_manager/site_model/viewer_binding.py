@@ -29,6 +29,8 @@ class ViewerRenderRecord:
     artist_confirmed: bool
     label: str
     notes: str
+    reason: str
+    evidence: tuple[str, ...]
     source_id: str
     source_kind: str
     source_path: str
@@ -108,6 +110,8 @@ class SiteModelViewerBinding:
                     artist_confirmed=record.artist_confirmed,
                     label=record.label,
                     notes=record.notes,
+                    reason=record.reason,
+                    evidence=record.evidence,
                     source_id=record.source_id,
                     source_kind=record.source_kind,
                     source_path=record.source_path,

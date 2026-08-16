@@ -5,6 +5,7 @@ from pathlib import Path
 
 from .schema import AnnotationSource, SemanticRole
 from .service import SiteModelService
+from .semantic_classification import SemanticAnalysisResult, SemanticClassificationPipeline
 from .viewer_binding import SiteModelViewerBinding, ViewerBindingSnapshot
 from .viewer_interaction import SiteModelViewerInteraction
 
@@ -38,10 +39,12 @@ class SiteViewerPresenter:
         persistence_path: str | Path | None = None,
         interaction: SiteModelViewerInteraction | None = None,
         binding: SiteModelViewerBinding | None = None,
+        semantic_pipeline: SemanticClassificationPipeline | None = None,
     ) -> None:
         self.service = service
         self.interaction = interaction or SiteModelViewerInteraction(service, persistence_path=persistence_path)
         self.binding = binding or SiteModelViewerBinding()
+        self.semantic_pipeline = semantic_pipeline or SemanticClassificationPipeline()
         self._active_source_id: str | None = None
         self._visible_annotation_sources: tuple[AnnotationSource, ...] = tuple(AnnotationSource)
 
@@ -118,6 +121,12 @@ class SiteViewerPresenter:
             current.remove(value)
         self._visible_annotation_sources = tuple(item for item in AnnotationSource if item in current)
         return self.state(status="Semantic overlay filters updated")
+
+
+    def reanalyze_semantics(self) -> tuple[ProjectViewerState, SemanticAnalysisResult]:
+        visible_ids = tuple(record.geometry_id for record in self.snapshot().records)
+        result = self.semantic_pipeline.analyze(self.service, visible_ids)
+        return self.state(status=f"AI semantic analysis updated {len(result.classified_geometry_ids)} geometry item(s)"), result
 
     def select(self, geometry_id: str, *, additive: bool = False) -> ProjectViewerState:
         geometry_id = str(geometry_id)

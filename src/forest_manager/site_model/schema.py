@@ -105,6 +105,8 @@ class SemanticAnnotation:
     confidence: float | None = None
     label: str = ""
     notes: str = ""
+    reason: str = ""
+    evidence: tuple[str, ...] = ()
     revision: int = 1
 
     def __post_init__(self) -> None:
@@ -131,6 +133,8 @@ class SemanticAnnotation:
             "confidence": self.confidence,
             "label": self.label,
             "notes": self.notes,
+            "reason": self.reason,
+            "evidence": list(self.evidence),
             "revision": int(self.revision),
         }
 
@@ -144,6 +148,8 @@ class SemanticAnnotation:
             confidence=None if confidence is None else float(confidence),
             label=str(payload.get("label") or ""),
             notes=str(payload.get("notes") or ""),
+            reason=str(payload.get("reason") or ""),
+            evidence=tuple(str(item) for item in payload.get("evidence") or ()),
             revision=int(payload.get("revision", 1)),
         )
 

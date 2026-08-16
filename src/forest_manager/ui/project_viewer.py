@@ -101,15 +101,18 @@ if QWidget is not None:
             self.role_combo = QComboBox()
             for role in SemanticRole:
                 self.role_combo.addItem(role.value.replace("_", " ").title(), role.value)
+            self.reanalyze_button = QPushButton("Reanalyze Semantics")
             self.approve_button = QPushButton("Approve AI Role")
             self.assign_button = QPushButton("Assign Role")
             self.reject_button = QPushButton("Reject")
             self.clear_button = QPushButton("Clear Selection")
+            self.reanalyze_button.clicked.connect(self.reanalyze_semantics)
             self.approve_button.clicked.connect(self.approve_selected)
             self.assign_button.clicked.connect(self.assign_selected_role)
             self.reject_button.clicked.connect(self.reject_selected)
             self.clear_button.clicked.connect(self.clear_selection)
             controls.addWidget(self.role_combo, 1)
+            controls.addWidget(self.reanalyze_button)
             controls.addWidget(self.approve_button)
             controls.addWidget(self.assign_button)
             controls.addWidget(self.reject_button)
@@ -186,7 +189,9 @@ if QWidget is not None:
             role = "unclassified" if record.role is None else record.role.value
             source = "none" if record.annotation_source is None else record.annotation_source.value
             location = record.layer or (f"page {record.page_index + 1}" if record.page_index is not None else "")
-            return f"{record.geometry_id}\nRole: {role}\nSemantic source: {source}\n{location}".strip()
+            reason = record.reason or "none"
+            evidence = ", ".join(record.evidence) if record.evidence else "none"
+            return f"{record.geometry_id}\nRole: {role}\nSemantic source: {source}\nReason: {reason}\nEvidence: {evidence}\n{location}".strip()
 
         def _source_changed(self, _index: int) -> None:
             if self._updating_filters:
@@ -219,6 +224,15 @@ if QWidget is not None:
             state = self.presenter.clear_selection()
             self.refresh()
             self._apply_state(state)
+
+
+        def reanalyze_semantics(self) -> None:
+            try:
+                state, _result = self.presenter.reanalyze_semantics()
+                self.refresh()
+                self._apply_state(state)
+            except Exception as exc:
+                self._apply_state(self.presenter.state(status="Semantic analysis failed", error=f"{type(exc).__name__}: {exc}"))
 
         def approve_selected(self) -> None:
             try:
@@ -258,6 +272,7 @@ if QWidget is not None:
             self.status_label.setText(state.error or state.status)
             self.status_label.setToolTip(state.error or "")
             has_selection = bool(state.selected_geometry_ids)
+            self.reanalyze_button.setEnabled(state.geometry_count > 0)
             self.approve_button.setEnabled(has_selection)
             self.assign_button.setEnabled(has_selection)
             self.reject_button.setEnabled(has_selection)
