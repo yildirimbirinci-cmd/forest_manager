@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import base64
 import json
@@ -10,8 +10,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 49491
 EXPECTED_BRIDGE_VERSION = "0.9.53"
-EXPECTED_BRIDGE_BUILD_ID = "stage5d33-json-endpoint-reload-20260816b"
-
+EXPECTED_BRIDGE_BUILD_ID = "stage6-1-general-scalar-write-20260816b"
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
 
@@ -48,11 +47,9 @@ def install_startup_bridge_loader() -> list[Path]:
     profiles_root = Path(local_appdata) / "Autodesk" / "3dsMax"
     if not profiles_root.is_dir():
         return []
-
     bridge_path = project_root() / "maxscripts" / "ForestManager_Bridge.ms"
     if not bridge_path.is_file():
         raise RuntimeError("Forest Manager bridge file not found: " + str(bridge_path))
-
     loader_text = _startup_loader_text(bridge_path)
     installed: list[Path] = []
     for version_dir in profiles_root.iterdir():
@@ -61,7 +58,6 @@ def install_startup_bridge_loader() -> list[Path]:
         locale_dirs = [item for item in version_dir.iterdir() if item.is_dir()]
         for locale_dir in locale_dirs:
             startup_dir = locale_dir / "scripts" / "startup"
-            # Only create startup folders inside a real 3ds Max profile.
             if not (locale_dir / "scripts").exists() and not startup_dir.exists():
                 continue
             startup_dir.mkdir(parents=True, exist_ok=True)
@@ -116,12 +112,10 @@ def reload_current_bridge() -> dict:
     bridge_path = project_root() / "maxscripts" / "ForestManager_Bridge.ms"
     if not bridge_path.is_file():
         raise RuntimeError("Forest Manager bridge file not found: " + str(bridge_path))
-
     encoded = base64.b64encode(str(bridge_path).encode("utf-8")).decode("ascii")
     response = send_command("RELOAD_BRIDGE|" + encoded, timeout=5.0)
     if not response.get("ok"):
         raise RuntimeError("Bridge reload request failed: " + json.dumps(response, ensure_ascii=False))
-
     last_error = ""
     for _ in range(40):
         time.sleep(0.2)
@@ -143,7 +137,6 @@ def reload_current_bridge() -> dict:
 
 
 def ensure_current_bridge() -> dict:
-    # Keep the next 3ds Max launch self-healing even when the current session is healthy.
     startup_paths = install_startup_bridge_loader()
 
     try:
@@ -152,7 +145,6 @@ def ensure_current_bridge() -> dict:
             return send_command("PING", timeout=1.5)
     except Exception:
         pass
-
     try:
         return reload_current_bridge()
     except Exception as exc:
@@ -162,5 +154,3 @@ def ensure_current_bridge() -> dict:
         raise RuntimeError(
             "Automatic bridge preflight failed." + startup_note + " Details: " + str(exc)
         ) from exc
-
-

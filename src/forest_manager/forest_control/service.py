@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,7 +89,161 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Compatibility facade over the verified read-only Forest Pack discovery core."""
+    """Forest Pack discovery plus Stage 6.1 verified scalar write/rollback endpoints."""
+
+    EXPLICIT_RUNTIME_READ_ONLY = {"geomtexid", "fastopac", "renderid", "divtmap", "geomtex"}
+    SCALAR_CLASS_FAMILIES = {
+        "BooleanClass": "bool",
+        "Integer": "int",
+        "Integer64": "int",
+        "Float": "float",
+        "Double": "float",
+        "String": "string",
+    }
+
+    def __init__(self) -> None:
+        self._rollback_journal: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _token(value: str) -> str:
+        return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+    @classmethod
+    def _scalar_type_for(cls, value_class: str, value: Any) -> tuple[str, str]:
+        scalar_type = cls.SCALAR_CLASS_FAMILIES.get(value_class, "")
+        if not scalar_type:
+            raise ForestControlError(f"Unsupported scalar value class: {value_class}")
+        if scalar_type == "bool":
+            if not isinstance(value, bool):
+                raise ForestControlError(f"Boolean property requires bool, got {type(value).__name__}")
+            return scalar_type, "true" if value else "false"
+        if scalar_type == "int":
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ForestControlError(f"Integer property requires int, got {type(value).__name__}")
+            return scalar_type, str(value)
+        if scalar_type == "float":
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ForestControlError(f"Float property requires numeric value, got {type(value).__name__}")
+            return scalar_type, repr(float(value))
+        if not isinstance(value, str):
+            raise ForestControlError(f"String property requires str, got {type(value).__name__}")
+        return scalar_type, value
+
+    @staticmethod
+    def _values_match(actual: Any, expected: Any, scalar_type: str) -> bool:
+        if scalar_type == "float":
+            try:
+                return abs(float(actual) - float(expected)) <= 1e-6
+            except (TypeError, ValueError):
+                return False
+        return type(actual) is type(expected) and actual == expected
+
+    def get_property(self, forest_name: str, property_name: str, *, preflight: bool = True) -> dict[str, Any]:
+        if preflight:
+            ensure_current_bridge()
+        command = "FOREST_CONTROL_GET_PROPERTY|" + self._token(forest_name) + "|" + self._token(property_name)
+        data = _require_ok(send_command(command), "FOREST_CONTROL_GET_PROPERTY")
+        prop = data.get("property")
+        if not isinstance(prop, dict):
+            raise ForestControlError("FOREST_CONTROL_GET_PROPERTY returned invalid property data.")
+        if str(data.get("forest_name") or "") != forest_name or str(prop.get("name") or "") != property_name:
+            raise ForestControlError("FOREST_CONTROL_GET_PROPERTY identity mismatch.")
+        if prop.get("readable") is not True:
+            raise ForestControlError(f"Forest property is not readable: {forest_name}.{property_name}")
+        return prop
+
+    def _send_scalar(
+        self,
+        forest_name: str,
+        property_name: str,
+        value: bool | int | float | str,
+        *,
+        value_class: str,
+        preflight: bool,
+    ) -> dict[str, Any]:
+        if preflight:
+            ensure_current_bridge()
+        scalar_type, encoded_text = self._scalar_type_for(value_class, value)
+        command = "|".join((
+            "FOREST_CONTROL_SET_SCALAR",
+            self._token(forest_name),
+            self._token(property_name),
+            scalar_type,
+            self._token(encoded_text),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_SET_SCALAR")
+        if data.get("verified") is not True:
+            raise ForestControlError(f"Forest scalar write was not verified: {forest_name}.{property_name}")
+        readback = self.get_property(forest_name, property_name, preflight=False)
+        if not self._values_match(readback.get("value"), value, scalar_type):
+            raise ForestControlError(f"Forest scalar readback mismatch: {forest_name}.{property_name}")
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "value_class": value_class,
+            "scalar_type": scalar_type,
+            "before_value": data.get("before_value"),
+            "after_value": readback.get("value"),
+            "verified": True,
+        }
+
+    def set_property(
+        self,
+        forest_name: str,
+        property_name: str,
+        value: bool | int | float | str,
+        *,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        if property_name.lower() in self.EXPLICIT_RUNTIME_READ_ONLY:
+            raise ForestControlError(f"Forest property is explicitly read-only: {property_name}")
+        before = self.get_property(forest_name, property_name, preflight=preflight)
+        if str(before.get("write_mode") or "") != "scalar":
+            raise ForestControlError(
+                f"Forest property is not scalar writable: {forest_name}.{property_name} "
+                f"class={before.get('value_class')} mode={before.get('write_mode')}"
+            )
+        value_class = str(before.get("value_class") or "")
+        self._scalar_type_for(value_class, value)
+        result = self._send_scalar(
+            forest_name, property_name, value, value_class=value_class, preflight=False
+        )
+        self._rollback_journal.append({
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "value_class": value_class,
+            "value": before.get("value"),
+        })
+        return result
+
+    def rollback(self) -> list[dict[str, Any]]:
+        if not self._rollback_journal:
+            return []
+        results: list[dict[str, Any]] = []
+        pending = list(reversed(self._rollback_journal))
+        restored = 0
+        try:
+            for entry in pending:
+                result = self._send_scalar(
+                    str(entry["forest_name"]),
+                    str(entry["property_name"]),
+                    entry["value"],
+                    value_class=str(entry["value_class"]),
+                    preflight=(restored == 0),
+                )
+                results.append({
+                    "forest_name": entry["forest_name"],
+                    "property_name": entry["property_name"],
+                    "restored": entry["value"],
+                    "verified": bool(result.get("verified")),
+                })
+                restored += 1
+        except Exception:
+            remaining_original_order = list(reversed(pending[restored:]))
+            self._rollback_journal = remaining_original_order
+            raise
+        self._rollback_journal.clear()
+        return results
 
     def list_forests(self, *, preflight: bool = True) -> tuple[str, ...]:
         return tuple(snapshot.forest_name for snapshot in self.discover(preflight=preflight))

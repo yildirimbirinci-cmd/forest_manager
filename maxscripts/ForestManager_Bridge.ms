@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage5d33-json-endpoint-reload-20260816b\"}"
+        ",\"bridge_build_id\":\"stage6-1-general-scalar-write-20260816b\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6064,6 +6064,117 @@ struct ForestManagerBridgeState
         result
     ),
 
+    fn findForestControlNode forestName =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        local node = getNodeByName forestName
+        if node == undefined do throw ("Forest control target not found: " + forestName)
+        local isForest = false
+        try (isForest = isKindOf node ::Forest_Pro) catch (isForest = false)
+        if not isForest do throw ("Forest control target is not Forest Pack: " + forestName)
+        node
+    ),
+
+    fn forestControlPropertyName forestNode propertyName =
+    (
+        local propName = propertyName as name
+        local names = getPropNames forestNode
+        if (findItem names propName) == 0 do throw ("Forest control property not found: " + propertyName)
+        propName
+    ),
+
+    fn forestControlExplicitReadOnly propertyName =
+    (
+        local p = toLower propertyName
+        p == "geomtexid" or p == "fastopac" or p == "renderid" or p == "divtmap" or p == "geomtex"
+    ),
+
+    fn forestControlGetPropertyJson forestName propertyName =
+    (
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local propertyJson = forestControlPropertyJson forestNode propName
+        "{\"forest_name\":" + (jsonString forestNode.name) + ",\"property\":" + propertyJson + ",\"verified\":true}"
+    ),
+
+    fn forestControlScalarFamily valueClass =
+    (
+        if valueClass == "BooleanClass" then return "bool"
+        if valueClass == "Integer" or valueClass == "Integer64" then return "int"
+        if valueClass == "Float" or valueClass == "Double" then return "float"
+        if valueClass == "String" then return "string"
+        ""
+    ),
+
+    fn parseForestControlScalar scalarType encodedValue =
+    (
+        local text = decodeBase64Utf8 encodedValue
+        case scalarType of
+        (
+            "bool":
+            (
+                local normalized = toLower text
+                if normalized == "true" or normalized == "1" then true
+                else if normalized == "false" or normalized == "0" then false
+                else throw ("Invalid Boolean scalar value: " + text)
+            )
+            "int": (text as integer)
+            "float": (text as float)
+            "string": text
+            default: throw ("Unsupported scalar type: " + scalarType)
+        )
+    ),
+
+    fn forestControlSetScalarJson forestName propertyName scalarType encodedValue =
+    (
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        if forestControlExplicitReadOnly propertyName do throw ("Forest control property is explicitly read-only: " + propertyName)
+
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = getProperty forestNode propName) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control property is unreadable: " + propertyName)
+        local beforeClass = safeClassName beforeValue
+        local writeMode = forestControlWriteMode beforeValue
+        if writeMode != "scalar" do throw ("Forest control property is not scalar writable: " + propertyName + " class=" + beforeClass)
+
+        local expectedFamily = forestControlScalarFamily beforeClass
+        if expectedFamily == "" do throw ("Unsupported Forest control scalar class: " + beforeClass)
+        if scalarType != expectedFamily do throw ("Scalar type mismatch for " + propertyName + ": expected " + expectedFamily + ", got " + scalarType)
+
+        local beforeJson = safePropertyValueJson forestNode propName
+        local newValue = parseForestControlScalar scalarType encodedValue
+        setProperty forestNode propName newValue
+        refreshForestPreviewNode forestNode
+
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = getProperty forestNode propName) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control readback failed: " + propertyName)
+        local afterClass = safeClassName afterValue
+        local afterFamily = forestControlScalarFamily afterClass
+        local verified = false
+        if scalarType == "float" then
+        (
+            try (verified = (abs ((afterValue as float) - (newValue as float))) <= 0.000001) catch (verified = false)
+        )
+        else
+        (
+            try (verified = (afterValue == newValue)) catch (verified = false)
+        )
+        if afterFamily != expectedFamily do verified = false
+        if not verified do throw ("Forest control scalar write verification failed: " + propertyName)
+
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"value_class\":" + (jsonString afterClass) +
+        ",\"scalar_type\":" + (jsonString scalarType) +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + safePropertyValueJson forestNode propName +
+        ",\"verified\":true}"
+    ),
+
     fn handleCommand rawCommand =
     (
         local cleanCommand = trimLeft (trimRight rawCommand)
@@ -6085,6 +6196,40 @@ struct ForestManagerBridgeState
             )
         )
 
+
+        if matchPattern command pattern:"FOREST_CONTROL_GET_PROPERTY|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_GET_PROPERTY requires forest and property tokens."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_GET_PROPERTY\",\"data\":" + forestControlGetPropertyJson forestName propertyName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_GET_PROPERTY" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_SCALAR|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 5 do throw "FOREST_CONTROL_SET_SCALAR requires forest, property, type and value tokens."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local scalarType = toLower parts[4]
+                local encodedValue = parts[5]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_SCALAR\",\"data\":" + forestControlSetScalarJson forestName propertyName scalarType encodedValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_SCALAR" (getCurrentException())
+            )
+        )
 
         if command == "FOREST_CONTROL_DISCOVER" then
         (
