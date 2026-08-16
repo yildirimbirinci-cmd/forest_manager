@@ -9,6 +9,7 @@ from .ingestion import (
     SiteModelIngestor,
     SourceLocator,
 )
+from .parser_adapters import CadParserAdapter, ParsedPrimitive, ParserAdapterError, PdfParserAdapter
 from .persistence import SiteModelPersistence
 from .schema import (
     AnnotationSource,
@@ -21,15 +22,20 @@ from .schema import (
 )
 from .service import SiteModelError, SiteModelService
 from .viewer import SiteModelViewerAdapter, ViewerGeometryRecord, ViewerSnapshot
+from .viewer_interaction import SiteModelViewerInteraction, ViewerCorrectionResult, ViewerSelectionState
 
 __all__ = [
     "AREA_ROLES",
     "BOUNDARY_ROLES",
     "AnnotationSource",
+    "CadParserAdapter",
     "GeometryKind",
     "ImportBatch",
     "ImportedEntity",
     "IngestionResult",
+    "ParsedPrimitive",
+    "ParserAdapterError",
+    "PdfParserAdapter",
     "ProjectSource",
     "ProjectSourceKind",
     "SemanticAnnotation",
@@ -41,9 +47,12 @@ __all__ = [
     "SiteModelService",
     "SiteModelSnapshot",
     "SiteModelViewerAdapter",
+    "SiteModelViewerInteraction",
     "SitePoint",
     "SourceLocator",
+    "ViewerCorrectionResult",
     "ViewerGeometryRecord",
+    "ViewerSelectionState",
     "ViewerSnapshot",
     "create_geometry",
     "is_boundary_role",
