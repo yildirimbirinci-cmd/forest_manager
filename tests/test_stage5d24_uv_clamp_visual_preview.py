@@ -4,7 +4,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "uv_clamp_visual_preview_stage5d24.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "uv_clamp_visual_preview_stage5d24.py"
 
 
 def function_block(name: str) -> str:

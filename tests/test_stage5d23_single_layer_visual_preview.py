@@ -4,7 +4,7 @@ import re
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "single_layer_visual_preview_stage5d23.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "single_layer_visual_preview_stage5d23.py"
 
 
 def activation_block():

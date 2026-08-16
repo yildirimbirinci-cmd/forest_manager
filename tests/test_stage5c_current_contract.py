@@ -2,7 +2,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = (ROOT / "maxscripts" / "ForestManager_Bridge.ms").read_text(encoding="utf-8")
 RUNTIME = (ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py").read_text(encoding="utf-8")
-DENSITY = (ROOT / "src" / "forest_manager" / "app" / "density_stage5c3.py").read_text(encoding="utf-8")
+DENSITY = (ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "density_stage5c3.py").read_text(encoding="utf-8")
 
 def test_current_bridge_identity_is_single_source_of_truth():
     assert "bridge_version" in BRIDGE and "0.9.54" in BRIDGE

@@ -5,7 +5,7 @@ import json
 import sys
 
 from forest_manager.max_bridge.runtime_bridge import send_command
-from forest_manager.app.species_preview_bootstrap import ensure_species_preview_ready
+from forest_manager.devtools.legacy.species_preview_bootstrap import ensure_species_preview_ready
 
 
 def main() -> int:

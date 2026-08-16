@@ -6,7 +6,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SERVICE = ROOT / "src" / "forest_manager" / "forest_control" / "service.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "forest_pack_curve_control_stage5d38.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "forest_pack_curve_control_stage5d38.py"
 
 
 def test_service_exposes_verified_read_only_curve_boundary():

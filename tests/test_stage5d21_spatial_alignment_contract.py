@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "species_mask_alignment_contract_stage5d21.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "species_mask_alignment_contract_stage5d21.py"
 
 
 def probe_block():

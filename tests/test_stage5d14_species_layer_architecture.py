@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "species_layer_architecture_stage5d14.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "species_layer_architecture_stage5d14.py"
 
 
 def context_block():

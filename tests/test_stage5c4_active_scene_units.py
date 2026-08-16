@@ -2,7 +2,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
-CLI = ROOT / "src" / "forest_manager" / "app" / "scene_units_stage5c4.py"
+CLI = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "scene_units_stage5c4.py"
 
 
 def source() -> str:

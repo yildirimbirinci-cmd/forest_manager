@@ -2,7 +2,7 @@ from pathlib import Path
 import importlib.util
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "src" / "forest_manager" / "app" / "transform_plan_stage5d3.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "transform_plan_stage5d3.py"
 
 
 def _load():

@@ -2,7 +2,7 @@ from pathlib import Path
 
 
 def test_stage5d25_contract_source_contains_verified_species_and_safety_sequence():
-    source = Path("src/forest_manager/app/restore_species_baseline_stage5d25.py").read_text(encoding="utf-8")
+    source = Path("src/forest_manager/devtools/legacy/restore_species_baseline_stage5d25.py").read_text(encoding="utf-8")
     assert "Lavandula angustifolia 'Hidcote' (Lavender)" in source
     assert "Butomus umbellatus (Flowering rush )" in source
     assert "Bush_Berberis" in source
@@ -15,7 +15,7 @@ def test_stage5d25_contract_source_contains_verified_species_and_safety_sequence
 
 
 def test_stage5d25_uses_actual_selection_spline_area_contract_fields():
-    source = Path("src/forest_manager/app/restore_species_baseline_stage5d25.py").read_text(encoding="utf-8")
+    source = Path("src/forest_manager/devtools/legacy/restore_species_baseline_stage5d25.py").read_text(encoding="utf-8")
     assert 'selection.get("spline_count")' in source
     assert 'selection.get("all_splines_closed")' in source
     assert 'selection.get("node_name")' in source

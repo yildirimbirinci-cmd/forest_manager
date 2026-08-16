@@ -2,8 +2,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-DENSITY = ROOT / "src" / "forest_manager" / "app" / "density_stage5c3.py"
-UNITS = ROOT / "src" / "forest_manager" / "app" / "scene_units_stage5c4.py"
+DENSITY = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "density_stage5c3.py"
+UNITS = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "scene_units_stage5c4.py"
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 
 

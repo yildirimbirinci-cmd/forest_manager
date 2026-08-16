@@ -1,6 +1,6 @@
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "src" / "forest_manager" / "app" / "density_stage5c3.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "density_stage5c3.py"
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 
 def test_default_density_is_exactly_75_meters():

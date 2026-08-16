@@ -1,7 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "src" / "forest_manager" / "app" / "composition_stage5d1.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "composition_stage5d1.py"
 
 
 def test_apply_uses_existing_probability_bridge_command():

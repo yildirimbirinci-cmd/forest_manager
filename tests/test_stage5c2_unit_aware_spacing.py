@@ -1,7 +1,7 @@
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
-APP = ROOT / "src" / "forest_manager" / "app" / "density_stage5c2.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "density_stage5c2.py"
 
 def spacing_block():
     s = BRIDGE.read_text(encoding="utf-8")

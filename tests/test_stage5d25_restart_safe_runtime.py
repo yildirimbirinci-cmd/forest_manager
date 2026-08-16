@@ -3,7 +3,7 @@ import re
 
 ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-STAGE = ROOT / "src" / "forest_manager" / "app" / "restore_species_baseline_stage5d25.py"
+STAGE = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "restore_species_baseline_stage5d25.py"
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 
 

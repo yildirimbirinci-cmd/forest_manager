@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "bind_species_masks_stage5d20.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "bind_species_masks_stage5d20.py"
 
 
 def bind_block():

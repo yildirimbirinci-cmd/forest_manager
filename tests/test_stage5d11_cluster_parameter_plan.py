@@ -1,7 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "src" / "forest_manager" / "app" / "cluster_parameter_plan_stage5d11.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "cluster_parameter_plan_stage5d11.py"
 
 
 def source() -> str:

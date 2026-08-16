@@ -3,7 +3,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
-APP = ROOT / "src" / "forest_manager" / "app" / "cluster_probe_stage5d7.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "cluster_probe_stage5d7.py"
 
 
 def test_bridge_exposes_read_only_cluster_probe():

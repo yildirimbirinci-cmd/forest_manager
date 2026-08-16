@@ -1,7 +1,7 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-APP = ROOT / "src" / "forest_manager" / "app" / "cluster_plan_stage5d9.py"
+APP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "cluster_plan_stage5d9.py"
 
 
 def test_plan_uses_verified_cluster_diversity_mode():

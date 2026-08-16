@@ -1,6 +1,6 @@
 from pathlib import Path
 ROOT=Path(__file__).resolve().parents[1]
-APP=(ROOT/"src"/"forest_manager"/"app"/"clustered_three_layer_composition_stage5d31.py").read_text(encoding="utf-8")
+APP=(ROOT/"src"/"forest_manager"/"devtools"/"legacy"/"clustered_three_layer_composition_stage5d31.py").read_text(encoding="utf-8")
 GEN=(ROOT/"src"/"forest_manager"/"placement"/"species_mask_generator.py").read_text(encoding="utf-8")
 def test_cluster_policy_and_order():
     assert "def generate_species_cluster_masks(" in GEN and "deterministic_species_cluster_masks_v2" in GEN

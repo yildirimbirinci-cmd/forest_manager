@@ -1,9 +1,9 @@
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-BOOTSTRAP = ROOT / "src" / "forest_manager" / "app" / "species_preview_bootstrap.py"
-STAGE23 = ROOT / "src" / "forest_manager" / "app" / "single_layer_visual_preview_stage5d23.py"
-STAGE24 = ROOT / "src" / "forest_manager" / "app" / "uv_clamp_visual_preview_stage5d24.py"
+BOOTSTRAP = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "species_preview_bootstrap.py"
+STAGE23 = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "single_layer_visual_preview_stage5d23.py"
+STAGE24 = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "uv_clamp_visual_preview_stage5d24.py"
 
 
 def test_bootstrap_preserves_protected_contracts():

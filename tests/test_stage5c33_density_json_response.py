@@ -1,7 +1,7 @@
 from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
-CLI = ROOT / "src" / "forest_manager" / "app" / "density_stage5c3.py"
+CLI = ROOT / "src" / "forest_manager" / "devtools" / "legacy" / "density_stage5c3.py"
 RUNTIME = ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py"
 
 def density_command_block():
