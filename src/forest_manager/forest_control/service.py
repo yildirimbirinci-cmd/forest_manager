@@ -762,11 +762,21 @@ class ForestPackControlService(ForestControlService):
         })
         return result
 
-    def rollback(self) -> list[dict[str, Any]]:
-        if not self._rollback_journal:
+    def rollback_marker(self) -> int:
+        """Return a stable journal boundary for scoped transaction rollback."""
+        return len(self._rollback_journal)
+
+    def rollback_to(self, marker: int) -> list[dict[str, Any]]:
+        if isinstance(marker, bool) or not isinstance(marker, int):
+            raise ForestControlError("Rollback marker must be an integer.")
+        if marker < 0 or marker > len(self._rollback_journal):
+            raise ForestControlError(
+                f"Rollback marker is outside the current journal: {marker}/{len(self._rollback_journal)}"
+            )
+        if marker == len(self._rollback_journal):
             return []
         results: list[dict[str, Any]] = []
-        pending = list(reversed(self._rollback_journal))
+        pending = list(reversed(self._rollback_journal[marker:]))
         restored = 0
         try:
             for entry in pending:
@@ -846,10 +856,13 @@ class ForestPackControlService(ForestControlService):
                 restored += 1
         except Exception:
             remaining_original_order = list(reversed(pending[restored:]))
-            self._rollback_journal = remaining_original_order
+            self._rollback_journal = self._rollback_journal[:marker] + remaining_original_order
             raise
-        self._rollback_journal.clear()
+        del self._rollback_journal[marker:]
         return results
+
+    def rollback(self) -> list[dict[str, Any]]:
+        return self.rollback_to(0)
 
     def list_forests(self, *, preflight: bool = True) -> tuple[str, ...]:
         return tuple(snapshot.forest_name for snapshot in self.discover(preflight=preflight))
