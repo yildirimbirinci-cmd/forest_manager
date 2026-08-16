@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Iterable
 
 from .areas import AreaRecordsAdapter
+from .composition import CompositionControlService, CompositionRuntimeResult, DEFAULT_MASK_OUTPUT_DIR
 from .geometry import GeometrySourcesAdapter
 from .semantic_api import SemanticForestControlAPI
 from .semantic_transaction import SemanticScalarChange, SemanticTransactionManager, SemanticTransactionResult
@@ -17,7 +19,7 @@ class ForestControlSnapshot:
 
 
 class ForestControlEngine:
-    """Unified Stage 5D.55 facade over the verified Forest control layers."""
+    """Unified Forest control facade over the verified Stage 5D layers."""
 
     def __init__(
         self,
@@ -26,12 +28,14 @@ class ForestControlEngine:
         transactions: SemanticTransactionManager | None = None,
         geometry: GeometrySourcesAdapter | None = None,
         areas: AreaRecordsAdapter | None = None,
+        composition: CompositionControlService | None = None,
     ) -> None:
         self.service = service or ForestPackControlService()
         self.semantic = semantic or SemanticForestControlAPI(self.service)
         self.transactions = transactions or SemanticTransactionManager(self.service, self.semantic)
         self.geometry = geometry or GeometrySourcesAdapter(self.service)
         self.areas = areas or AreaRecordsAdapter(self.service)
+        self.composition = composition or CompositionControlService()
 
     def list_forests(self) -> tuple[str, ...]:
         return tuple(self.service.list_forests())
@@ -62,6 +66,12 @@ class ForestControlEngine:
 
     def area_record(self, forest_name: str, index: int):
         return self.areas.read_record(forest_name, index)
+
+    def apply_clustered_three_layer_composition(
+        self,
+        mask_output_dir: Path = DEFAULT_MASK_OUTPUT_DIR,
+    ) -> CompositionRuntimeResult:
+        return self.composition.apply_clustered_three_layer(mask_output_dir)
 
     def capability_summary(self, forest_name: str) -> dict[str, Any]:
         inventory = self.service.inventory(forest_name)

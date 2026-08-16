@@ -31,6 +31,26 @@ __all__ += [
     "SemanticTransactionResult",
 ]
 
+from .composition import (
+    CompositionControlError,
+    CompositionControlService,
+    CompositionRuntimeResult,
+    DEFAULT_MASK_OUTPUT_DIR,
+    EXPECTED_DENSITY_METERS,
+    EXPECTED_LAYERS,
+    validate_three_layer_composition,
+)
+
+__all__ += [
+    "CompositionControlError",
+    "CompositionControlService",
+    "CompositionRuntimeResult",
+    "DEFAULT_MASK_OUTPUT_DIR",
+    "EXPECTED_DENSITY_METERS",
+    "EXPECTED_LAYERS",
+    "validate_three_layer_composition",
+]
+
 from .general_control import ForestControlEngine, ForestControlSnapshot
 
 __all__ += [
