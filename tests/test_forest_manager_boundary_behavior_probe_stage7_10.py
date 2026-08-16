@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from forest_manager.app.forest_manager_boundary_behavior_probe_stage7_10 import build_probe
+from forest_manager.devtools.acceptance.forest_manager_boundary_behavior_probe_stage7_10 import build_probe
 
 
 @dataclass(frozen=True)
