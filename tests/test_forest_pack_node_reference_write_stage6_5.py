@@ -155,8 +155,8 @@ def test_stage65_bridge_contract_and_stable_startup_loader():
     assert "FOREST_CONTROL_SET_ARRAY_NODE_REF" in bridge_text
     assert "fn forestControlSetArrayNodeReferenceJson" in bridge_text
     assert "arnodelist" in bridge_text
-    assert "stage6-5-node-reference-write-20260816a" in bridge_text
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage6-5-node-reference-write-20260816a"' in runtime_text
+    assert "stage6-6-material-reference-write-20260816a" in bridge_text
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage6-6-material-reference-write-20260816a"' in runtime_text
     assert "catch (throw" not in bridge_text
     loader_section = runtime_text.split("def _startup_loader_text", 1)[1].split("def install_startup_bridge_loader", 1)[0]
     assert "EXPECTED_BRIDGE_BUILD_ID" not in loader_section

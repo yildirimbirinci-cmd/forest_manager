@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-5-node-reference-write-20260816a\"}"
+        ",\"bridge_build_id\":\"stage6-6-material-reference-write-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6137,6 +6137,22 @@ struct ForestManagerBridgeState
         throw ("Unsupported Forest control array scalar class: " + valueClass)
     ),
 
+    fn forestControlIsMaterialReference value =
+    (
+        if value == undefined then return false
+        local isMaterial = false
+        try (isMaterial = (superClassOf value == Material)) catch (isMaterial = false)
+        isMaterial
+    ),
+
+    fn forestControlMaterialNameEquals value materialName =
+    (
+        if value == undefined then return false
+        local matches = false
+        try (matches = (value.name == materialName)) catch (matches = false)
+        matches
+    ),
+
     fn forestControlGetArrayElementJson forestName propertyName zeroIndex =
     (
         local forestNode = findForestControlNode forestName
@@ -6174,11 +6190,17 @@ struct ForestManagerBridgeState
         (
             valueJson = if value == undefined then "null" else jsonString value.name
         )
+        else if (toLower propertyName) == "matlist" and (value == undefined or forestControlIsMaterialReference value) then
+        (
+            valueJson = if value == undefined then "null" else jsonString value.name
+        )
         else
         (
             throw ("Forest control array element is not writable by a verified endpoint: " + propertyName + "[" + (zeroIndex as string) + "] class=" + valueClass)
         )
-        local referenceType = if (toLower propertyName) == "arnodelist" and (value == undefined or isValidNode value) then "node" else ""
+        local referenceType = ""
+        if (toLower propertyName) == "arnodelist" and (value == undefined or isValidNode value) then referenceType = "node"
+        if (toLower propertyName) == "matlist" and (value == undefined or forestControlIsMaterialReference value) then referenceType = "material"
         "{\"forest_name\":" + (jsonString forestNode.name) +
         ",\"property_name\":" + (jsonString propertyName) +
         ",\"index\":" + (zeroIndex as string) +
@@ -6256,6 +6278,92 @@ struct ForestManagerBridgeState
         ",\"reference_type\":\"node\"" +
         ",\"before_value\":" + beforeJson +
         ",\"after_value\":" + (forestControlNodeReferenceValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlMaterialReferenceValueJson value =
+    (
+        if value == undefined then return "null"
+        local isMaterial = forestControlIsMaterialReference value
+        if isMaterial then return (jsonString value.name)
+        throw "Forest control material reference value is neither undefined nor a material."
+    ),
+
+    fn forestControlFindSceneMaterialByName materialName =
+    (
+        for mat in sceneMaterials where mat != undefined do
+        (
+            if forestControlMaterialNameEquals mat materialName do return mat
+        )
+        for node in objects where node != undefined do
+        (
+            local mat = undefined
+            try (mat = node.material) catch()
+            if mat != undefined and forestControlMaterialNameEquals mat materialName do return mat
+        )
+        undefined
+    ),
+
+    fn forestControlSetArrayMaterialReferenceJson forestName propertyName zeroIndex referenceMode encodedMaterialName =
+    (
+        if (toLower propertyName) != "matlist" do
+            throw ("Material reference array writes are not enabled for: " + propertyName)
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local arr = undefined
+        local readOk = true
+        try (arr = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control array property is unreadable: " + propertyName)
+        local arrayClass = safeClassName arr
+        if arrayClass != "ArrayParameter" and arrayClass != "Array" do
+            throw ("Forest control property is not an array: " + propertyName + " class=" + arrayClass)
+        if zeroIndex < 0 do throw "Forest control array index must be zero or greater."
+        local countValue = arr.count
+        if zeroIndex >= countValue do
+            throw ("Forest control array index out of range: " + propertyName + " index=" + (zeroIndex as string) + " count=" + (countValue as string))
+        local maxIndex = zeroIndex + 1
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = arr[maxIndex]) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
+        if beforeValue != undefined then
+        (
+            local beforeIsMaterial = forestControlIsMaterialReference beforeValue
+            if not beforeIsMaterial do
+                throw ("Forest control array element is not a material reference: " + propertyName + "[" + (zeroIndex as string) + "] class=" + (safeClassName beforeValue))
+        )
+        local beforeJson = forestControlMaterialReferenceValueJson beforeValue
+        local newValue = undefined
+        if referenceMode == "material" then
+        (
+            local materialName = decodeBase64Utf8 encodedMaterialName
+            if materialName == "" do throw "Material reference target name cannot be empty."
+            newValue = forestControlFindSceneMaterialByName materialName
+            if newValue == undefined do throw ("Material reference target was not found: " + materialName)
+        )
+        else if referenceMode != "null" then
+        (
+            throw ("Unsupported material reference mode: " + referenceMode)
+        )
+        arr[maxIndex] = newValue
+        refreshForestPreviewNode forestNode
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = arr[maxIndex]) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control array material reference readback failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local verified = false
+        if newValue == undefined then
+            verified = (afterValue == undefined) and (arr.count == countValue)
+        else
+            verified = (afterValue == newValue) and (arr.count == countValue)
+        if not verified do throw ("Forest control array material reference write verification failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"index\":" + (zeroIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"reference_type\":\"material\"" +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + (forestControlMaterialReferenceValueJson afterValue) +
         ",\"verified\":true}"
     ),
 
@@ -6516,6 +6624,25 @@ struct ForestManagerBridgeState
             )
         )
 
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_MATERIAL_REF|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FOREST_CONTROL_SET_ARRAY_MATERIAL_REF requires forest, property, zero-based index, mode and material token."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local zeroIndex = parts[4] as integer
+                local referenceMode = toLower parts[5]
+                local encodedMaterialName = parts[6]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_ARRAY_MATERIAL_REF\",\"data\":" + forestControlSetArrayMaterialReferenceJson forestName propertyName zeroIndex referenceMode encodedMaterialName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_ARRAY_MATERIAL_REF" (getCurrentException())
+            )
+        )
 
         if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_NODE_REF|*" ignoreCase:true then
         (

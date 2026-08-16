@@ -90,10 +90,11 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Forest Pack discovery plus verified scalar/color/array scalar/Point3/node-reference write and rollback endpoints."""
+    """Forest Pack discovery plus verified scalar/color/array scalar/Point3/node/material-reference write and rollback endpoints."""
 
     EXPLICIT_RUNTIME_READ_ONLY = {"geomtexid", "fastopac", "renderid", "divtmap", "geomtex"}
     NODE_REFERENCE_ARRAY_PROPERTIES = {"arnodelist"}
+    MATERIAL_REFERENCE_ARRAY_PROPERTIES = {"matlist"}
     SCALAR_CLASS_FAMILIES = {
         "BooleanClass": "bool",
         "Integer": "int",
@@ -452,6 +453,63 @@ class ForestPackControlService(ForestControlService):
             "verified": True,
         }
 
+    @staticmethod
+    def _normalize_material_reference(value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ForestControlError("Material reference array element requires a non-empty scene material name or None.")
+        return value.strip()
+
+    def _send_array_material_reference(
+        self,
+        forest_name: str,
+        property_name: str,
+        index: int,
+        value: str | None,
+        *,
+        preflight: bool,
+    ) -> dict[str, Any]:
+        if property_name.lower() not in self.MATERIAL_REFERENCE_ARRAY_PROPERTIES:
+            raise ForestControlError(f"Material reference array writes are not enabled for: {property_name}")
+        if preflight:
+            ensure_current_bridge()
+        material_name = self._normalize_material_reference(value)
+        mode = "null" if material_name is None else "material"
+        token = self._token(material_name) if material_name is not None else "NONE"
+        command = "|".join((
+            "FOREST_CONTROL_SET_ARRAY_MATERIAL_REF",
+            self._token(forest_name),
+            self._token(property_name),
+            str(index),
+            mode,
+            token,
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_SET_ARRAY_MATERIAL_REF")
+        if data.get("verified") is not True:
+            raise ForestControlError(
+                f"Forest array material reference write was not verified: {forest_name}.{property_name}[{index}]"
+            )
+        readback = self.get_array_element(forest_name, property_name, index, preflight=False)
+        if str(readback.get("reference_type") or "") != "material":
+            raise ForestControlError(
+                f"Forest array material reference readback type mismatch: {forest_name}.{property_name}[{index}]"
+            )
+        if readback.get("value") != material_name:
+            raise ForestControlError(
+                f"Forest array material reference readback mismatch: {forest_name}.{property_name}[{index}]"
+            )
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "index": index,
+            "value_class": str(readback.get("value_class") or ""),
+            "reference_type": "material",
+            "before_value": data.get("before_value"),
+            "after_value": readback.get("value"),
+            "verified": True,
+        }
+
     def set_array_element(
         self,
         forest_name: str,
@@ -470,6 +528,12 @@ class ForestPackControlService(ForestControlService):
                 forest_name, property_name, index, value, preflight=False
             )
             write_mode = "array_node_ref"
+        elif reference_type == "material" and property_name.lower() in self.MATERIAL_REFERENCE_ARRAY_PROPERTIES:
+            self._normalize_material_reference(value)
+            result = self._send_array_material_reference(
+                forest_name, property_name, index, value, preflight=False
+            )
+            write_mode = "array_material_ref"
         elif value_class == "Point3":
             self._normalize_point3(value)
             result = self._send_array_point3(
@@ -573,6 +637,14 @@ class ForestPackControlService(ForestControlService):
                         entry["value"],
                         preflight=(restored == 0),
                     )
+                elif write_mode == "array_material_ref":
+                    result = self._send_array_material_reference(
+                        str(entry["forest_name"]),
+                        str(entry["property_name"]),
+                        int(entry["index"]),
+                        entry["value"],
+                        preflight=(restored == 0),
+                    )
                 else:
                     result = self._send_scalar(
                         str(entry["forest_name"]),
@@ -587,7 +659,7 @@ class ForestPackControlService(ForestControlService):
                     "restored": entry["value"],
                     "verified": bool(result.get("verified")),
                 }
-                if write_mode in {"array_scalar", "array_point3", "array_node_ref"}:
+                if write_mode in {"array_scalar", "array_point3", "array_node_ref", "array_material_ref"}:
                     step["index"] = int(entry["index"])
                 results.append(step)
                 restored += 1
@@ -704,7 +776,9 @@ def aggregate_capability_matrix(snapshots: tuple[ForestSnapshot, ...]) -> dict[s
             "scalar": "read_write_transactional",
             "color": "read_write_transactional",
             "array_parameter": "primitive_scalar_and_point3_element_write",
-            "node_material_reference_arrays": "read_only_until_specialized_adapter",
+            "node_reference_arrays": "arnodelist_transactional",
+            "material_reference_arrays": "matlist_transactional",
+            "cproxy_bitmap_reference_arrays": "read_only_until_specialized_adapter",
             "curve_control": "read_only_verified_runtime_boundary",
         },
         "verified": bool(snapshots),
