@@ -67,6 +67,8 @@ class SiteModelViewerBinding:
         layers: Iterable[str] | None = None,
         roles: Iterable[SemanticRole | str] | None = None,
         annotation_sources: Iterable[AnnotationSource | str] | None = None,
+        max_confidence: float | None = None,
+        confidence_source: AnnotationSource | str | None = None,
     ) -> ViewerBindingSnapshot:
         snapshot = self.adapter.build(service)
         selected = set(() if interaction is None else interaction.selection.geometry_ids)
@@ -78,6 +80,11 @@ class SiteModelViewerBinding:
         source_filter = None if annotation_sources is None else {
             item if isinstance(item, AnnotationSource) else AnnotationSource(str(item)) for item in annotation_sources
         }
+        confidence_source_value = (
+            None
+            if confidence_source is None
+            else confidence_source if isinstance(confidence_source, AnnotationSource) else AnnotationSource(str(confidence_source))
+        )
 
         all_source_ids = tuple(sorted({record.source_id for record in snapshot.records if record.source_id}))
         source_records = [
@@ -97,6 +104,11 @@ class SiteModelViewerBinding:
                 continue
             if source_filter is not None and record.annotation_source not in source_filter:
                 continue
+            if max_confidence is not None:
+                if confidence_source_value is not None and record.annotation_source is not confidence_source_value:
+                    continue
+                if record.confidence is None or record.confidence > float(max_confidence):
+                    continue
             bounds = self._record_bounds(record)
             records.append(
                 ViewerRenderRecord(

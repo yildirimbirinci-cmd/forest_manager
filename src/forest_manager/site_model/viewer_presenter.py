@@ -27,10 +27,17 @@ class ProjectViewerState:
     available_layers: tuple[str, ...] = ()
     available_pages: tuple[int, ...] = ()
     visible_annotation_sources: tuple[AnnotationSource, ...] = tuple(AnnotationSource)
+    low_confidence_review_enabled: bool = False
+    confidence_threshold: float = 0.5
+    review_geometry_count: int = 0
+    selection_roles: tuple[SemanticRole, ...] = ()
+    selection_sources: tuple[AnnotationSource, ...] = ()
+    selection_mixed_roles: bool = False
+    selection_mixed_sources: bool = False
 
 
 class SiteViewerPresenter:
-    """Qt-independent orchestration for project-viewer selection, filtering and correction."""
+    """Qt-independent orchestration for project-viewer filtering and batch correction."""
 
     def __init__(
         self,
@@ -47,6 +54,8 @@ class SiteViewerPresenter:
         self.semantic_pipeline = semantic_pipeline or SemanticClassificationPipeline()
         self._active_source_id: str | None = None
         self._visible_annotation_sources: tuple[AnnotationSource, ...] = tuple(AnnotationSource)
+        self._low_confidence_review_enabled = False
+        self._confidence_threshold = 0.5
 
     @property
     def active_source_id(self) -> str | None:
@@ -62,6 +71,8 @@ class SiteViewerPresenter:
             interaction=self.interaction,
             source_id=self._active_source_id,
             annotation_sources=self._visible_annotation_sources,
+            max_confidence=self._confidence_threshold if self._low_confidence_review_enabled else None,
+            confidence_source=AnnotationSource.AI_INFERRED if self._low_confidence_review_enabled else None,
         )
 
     def all_sources_snapshot(self) -> ViewerBindingSnapshot:
@@ -70,12 +81,11 @@ class SiteViewerPresenter:
     def state(self, *, status: str = "Project viewer ready", error: str | None = None) -> ProjectViewerState:
         snapshot = self.snapshot()
         selection = self.interaction.selection
-        active_record = None
-        if selection.active_geometry_id is not None:
-            active_record = next(
-                (record for record in snapshot.records if record.geometry_id == selection.active_geometry_id),
-                None,
-            )
+        records_by_id = {record.geometry_id: record for record in snapshot.records}
+        active_record = records_by_id.get(selection.active_geometry_id) if selection.active_geometry_id else None
+        selected_records = [records_by_id[item] for item in selection.geometry_ids if item in records_by_id]
+        roles = tuple(sorted({r.role for r in selected_records if r.role is not None}, key=lambda r: r.value))
+        sources = tuple(sorted({r.annotation_source for r in selected_records if r.annotation_source is not None}, key=lambda s: s.value))
         return ProjectViewerState(
             revision=snapshot.revision,
             geometry_count=len(snapshot.records),
@@ -92,6 +102,13 @@ class SiteViewerPresenter:
             available_layers=snapshot.layers,
             available_pages=snapshot.page_indexes,
             visible_annotation_sources=self._visible_annotation_sources,
+            low_confidence_review_enabled=self._low_confidence_review_enabled,
+            confidence_threshold=self._confidence_threshold,
+            review_geometry_count=len(snapshot.records) if self._low_confidence_review_enabled else 0,
+            selection_roles=roles,
+            selection_sources=sources,
+            selection_mixed_roles=len(roles) > 1,
+            selection_mixed_sources=len(sources) > 1,
         )
 
     def set_active_source(self, source_id: str | None) -> ProjectViewerState:
@@ -100,15 +117,7 @@ class SiteViewerPresenter:
         if requested is not None and requested not in sources:
             raise ValueError(f"unknown project source: {requested}")
         self._active_source_id = requested
-        selection = self.interaction.selection
-        if selection.geometry_ids:
-            visible_ids = {record.geometry_id for record in self.snapshot().records}
-            kept = tuple(item for item in selection.geometry_ids if item in visible_ids)
-            if kept:
-                active = selection.active_geometry_id if selection.active_geometry_id in kept else kept[0]
-                self.interaction.select(kept, active_geometry_id=active)
-            else:
-                self.interaction.clear_selection()
+        self._prune_selection_to_visible()
         label = "all sources" if requested is None else requested
         return self.state(status=f"Showing {label}")
 
@@ -120,24 +129,46 @@ class SiteViewerPresenter:
         if not visible and value in current:
             current.remove(value)
         self._visible_annotation_sources = tuple(item for item in AnnotationSource if item in current)
+        self._prune_selection_to_visible()
         return self.state(status="Semantic overlay filters updated")
 
+    def set_low_confidence_review(self, enabled: bool, *, threshold: float | None = None) -> ProjectViewerState:
+        if threshold is not None:
+            value = float(threshold)
+            if not 0.0 <= value <= 1.0:
+                raise ValueError("confidence threshold must be between 0 and 1")
+            self._confidence_threshold = value
+        self._low_confidence_review_enabled = bool(enabled)
+        self._prune_selection_to_visible()
+        if self._low_confidence_review_enabled:
+            return self.state(status=f"Reviewing AI confidence <= {self._confidence_threshold:.2f}")
+        return self.state(status="Low-confidence review disabled")
 
     def reanalyze_semantics(self) -> tuple[ProjectViewerState, SemanticAnalysisResult]:
         visible_ids = tuple(record.geometry_id for record in self.snapshot().records)
         result = self.semantic_pipeline.analyze(self.service, visible_ids)
         return self.state(status=f"AI semantic analysis updated {len(result.classified_geometry_ids)} geometry item(s)"), result
 
-    def select(self, geometry_id: str, *, additive: bool = False) -> ProjectViewerState:
+    def select(self, geometry_id: str, *, additive: bool = False, toggle: bool = False) -> ProjectViewerState:
         geometry_id = str(geometry_id)
         visible = {record.geometry_id for record in self.snapshot().records}
         if geometry_id not in visible:
             raise ValueError(f"geometry is not visible in the current viewer filter: {geometry_id}")
         current = list(self.interaction.selection.geometry_ids) if additive else []
+        if toggle and geometry_id in current:
+            current.remove(geometry_id)
+            active = current[-1] if current else None
+            self.interaction.select(current, active_geometry_id=active)
+            return self.state(status=f"Deselected {geometry_id}")
         if geometry_id not in current:
             current.append(geometry_id)
         self.interaction.select(current, active_geometry_id=geometry_id)
         return self.state(status=f"Selected {geometry_id}")
+
+    def select_all_visible(self) -> ProjectViewerState:
+        ids = tuple(record.geometry_id for record in self.snapshot().records)
+        self.interaction.select(ids, active_geometry_id=ids[0] if ids else None)
+        return self.state(status=f"Selected {len(ids)} visible geometry item(s)")
 
     def clear_selection(self) -> ProjectViewerState:
         self.interaction.clear_selection()
@@ -155,3 +186,15 @@ class SiteViewerPresenter:
     def reject(self, *, notes: str = "") -> ProjectViewerState:
         result = self.interaction.reject_selected(notes=notes)
         return self.state(status=f"Rejected {len(result.geometry_ids)} geometry item(s)")
+
+    def _prune_selection_to_visible(self) -> None:
+        selection = self.interaction.selection
+        if not selection.geometry_ids:
+            return
+        visible_ids = {record.geometry_id for record in self.snapshot().records}
+        kept = tuple(item for item in selection.geometry_ids if item in visible_ids)
+        if kept:
+            active = selection.active_geometry_id if selection.active_geometry_id in kept else kept[0]
+            self.interaction.select(kept, active_geometry_id=active)
+        else:
+            self.interaction.clear_selection()

@@ -65,11 +65,15 @@ class SiteModelViewerInteraction:
 
     def approve_selected(self, *, notes: str = "") -> ViewerCorrectionResult:
         self._require_selection()
-        annotations: list[SemanticAnnotation] = []
+        resolved_by_id = {}
         for geometry_id in self._selection.geometry_ids:
             resolved = self.service.resolved_annotation(geometry_id)
             if resolved is None or resolved.role is SemanticRole.UNKNOWN:
                 raise SiteModelError(f"cannot approve geometry without an AI semantic role: {geometry_id}")
+            resolved_by_id[geometry_id] = resolved
+        annotations: list[SemanticAnnotation] = []
+        for geometry_id in self._selection.geometry_ids:
+            resolved = resolved_by_id[geometry_id]
             annotations.append(
                 self.service.apply_artist_confirmation(
                     geometry_id,

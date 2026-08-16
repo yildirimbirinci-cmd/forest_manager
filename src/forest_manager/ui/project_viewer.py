@@ -17,6 +17,7 @@ try:
     from PySide6.QtWidgets import (
         QCheckBox,
         QComboBox,
+        QDoubleSpinBox,
         QGraphicsPathItem,
         QGraphicsScene,
         QGraphicsSimpleTextItem,
@@ -42,7 +43,7 @@ if QWidget is not None:
 
         def mousePressEvent(self, event: Any) -> None:
             additive = bool(event.modifiers() & Qt.KeyboardModifier.ControlModifier)
-            self.owner.select_geometry(self.record.geometry_id, additive=additive)
+            self.owner.select_geometry(self.record.geometry_id, additive=additive, toggle=additive)
             event.accept()
 
 
@@ -86,6 +87,16 @@ if QWidget is not None:
             filters.addWidget(self.confirmed_overlay)
             filters.addWidget(self.override_overlay)
             filters.addWidget(self.labels_overlay)
+            self.low_confidence_review = QCheckBox("Low Confidence Review")
+            self.confidence_threshold = QDoubleSpinBox()
+            self.confidence_threshold.setRange(0.0, 1.0)
+            self.confidence_threshold.setSingleStep(0.05)
+            self.confidence_threshold.setDecimals(2)
+            self.confidence_threshold.setValue(0.50)
+            self.low_confidence_review.toggled.connect(self._confidence_review_changed)
+            self.confidence_threshold.valueChanged.connect(self._confidence_threshold_changed)
+            filters.addWidget(self.low_confidence_review)
+            filters.addWidget(self.confidence_threshold)
             root.addLayout(filters)
 
             self.info_label = QLabel("No project geometry loaded")
@@ -105,17 +116,20 @@ if QWidget is not None:
             self.approve_button = QPushButton("Approve AI Role")
             self.assign_button = QPushButton("Assign Role")
             self.reject_button = QPushButton("Reject")
+            self.select_all_button = QPushButton("Select Visible")
             self.clear_button = QPushButton("Clear Selection")
             self.reanalyze_button.clicked.connect(self.reanalyze_semantics)
             self.approve_button.clicked.connect(self.approve_selected)
             self.assign_button.clicked.connect(self.assign_selected_role)
             self.reject_button.clicked.connect(self.reject_selected)
+            self.select_all_button.clicked.connect(self.select_all_visible)
             self.clear_button.clicked.connect(self.clear_selection)
             controls.addWidget(self.role_combo, 1)
             controls.addWidget(self.reanalyze_button)
             controls.addWidget(self.approve_button)
             controls.addWidget(self.assign_button)
             controls.addWidget(self.reject_button)
+            controls.addWidget(self.select_all_button)
             controls.addWidget(self.clear_button)
             root.addLayout(controls)
 
@@ -212,13 +226,40 @@ if QWidget is not None:
             except Exception as exc:
                 self._apply_state(self.presenter.state(status="Overlay update failed", error=f"{type(exc).__name__}: {exc}"))
 
-        def select_geometry(self, geometry_id: str, *, additive: bool = False) -> None:
+        def select_geometry(self, geometry_id: str, *, additive: bool = False, toggle: bool = False) -> None:
             try:
-                state = self.presenter.select(geometry_id, additive=additive)
+                state = self.presenter.select(geometry_id, additive=additive, toggle=toggle)
                 self.refresh()
                 self._apply_state(state)
             except Exception as exc:
                 self._apply_state(self.presenter.state(status="Selection failed", error=f"{type(exc).__name__}: {exc}"))
+
+
+        def _confidence_review_changed(self, checked: bool) -> None:
+            if self._updating_filters:
+                return
+            try:
+                self.presenter.set_low_confidence_review(checked, threshold=self.confidence_threshold.value())
+                self.refresh()
+            except Exception as exc:
+                self._apply_state(self.presenter.state(status="Confidence review update failed", error=f"{type(exc).__name__}: {exc}"))
+
+        def _confidence_threshold_changed(self, value: float) -> None:
+            if self._updating_filters or not self.low_confidence_review.isChecked():
+                return
+            try:
+                self.presenter.set_low_confidence_review(True, threshold=value)
+                self.refresh()
+            except Exception as exc:
+                self._apply_state(self.presenter.state(status="Confidence threshold update failed", error=f"{type(exc).__name__}: {exc}"))
+
+        def select_all_visible(self) -> None:
+            try:
+                state = self.presenter.select_all_visible()
+                self.refresh()
+                self._apply_state(state)
+            except Exception as exc:
+                self._apply_state(self.presenter.state(status="Select visible failed", error=f"{type(exc).__name__}: {exc}"))
 
         def clear_selection(self) -> None:
             state = self.presenter.clear_selection()
@@ -265,14 +306,21 @@ if QWidget is not None:
             role = "none" if state.active_role is None else state.active_role.value
             confidence = "" if state.active_confidence is None else f" | confidence {state.active_confidence:.2f}"
             project_source = "all" if state.active_source_id is None else state.active_source_id
+            mixed = " | mixed roles" if state.selection_mixed_roles else ""
+            review = (
+                f" | Review <= {state.confidence_threshold:.2f}: {state.review_geometry_count}"
+                if state.low_confidence_review_enabled
+                else ""
+            )
             self.info_label.setText(
-                f"Geometry: {state.geometry_count} | Selected: {selected} | Role: {role} | "
-                f"Source: {source}{confidence} | Project: {project_source}"
+                f"Geometry: {state.geometry_count} | Selected: {selected} | Role: {role}{mixed} | "
+                f"Source: {source}{confidence} | Project: {project_source}{review}"
             )
             self.status_label.setText(state.error or state.status)
             self.status_label.setToolTip(state.error or "")
             has_selection = bool(state.selected_geometry_ids)
             self.reanalyze_button.setEnabled(state.geometry_count > 0)
+            self.select_all_button.setEnabled(state.geometry_count > 0)
             self.approve_button.setEnabled(has_selection)
             self.assign_button.setEnabled(has_selection)
             self.reject_button.setEnabled(has_selection)
