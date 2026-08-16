@@ -30,6 +30,8 @@ class ViewerRenderRecord:
     label: str
     notes: str
     source_id: str
+    source_kind: str
+    source_path: str
     layer: str
     page_index: int | None
     selected: bool
@@ -42,6 +44,9 @@ class ViewerBindingSnapshot:
     revision: int
     records: tuple[ViewerRenderRecord, ...]
     bounds: ViewerBounds | None
+    source_ids: tuple[str, ...] = ()
+    layers: tuple[str, ...] = ()
+    page_indexes: tuple[int, ...] = ()
 
 
 class SiteModelViewerBinding:
@@ -58,18 +63,37 @@ class SiteModelViewerBinding:
         source_id: str | None = None,
         page_index: int | None = None,
         layers: Iterable[str] | None = None,
+        roles: Iterable[SemanticRole | str] | None = None,
+        annotation_sources: Iterable[AnnotationSource | str] | None = None,
     ) -> ViewerBindingSnapshot:
         snapshot = self.adapter.build(service)
         selected = set(() if interaction is None else interaction.selection.geometry_ids)
         active = None if interaction is None else interaction.selection.active_geometry_id
         layer_filter = None if layers is None else {str(item) for item in layers}
+        role_filter = None if roles is None else {
+            item if isinstance(item, SemanticRole) else SemanticRole(str(item)) for item in roles
+        }
+        source_filter = None if annotation_sources is None else {
+            item if isinstance(item, AnnotationSource) else AnnotationSource(str(item)) for item in annotation_sources
+        }
+
+        all_source_ids = tuple(sorted({record.source_id for record in snapshot.records if record.source_id}))
+        source_records = [
+            record for record in snapshot.records
+            if source_id is None or record.source_id == str(source_id)
+        ]
+        available_layers = tuple(sorted({record.layer for record in source_records if record.layer}))
+        available_pages = tuple(sorted({record.page_index for record in source_records if record.page_index is not None}))
+
         records: list[ViewerRenderRecord] = []
-        for record in snapshot.records:
-            if source_id is not None and record.source_id != str(source_id):
-                continue
+        for record in source_records:
             if page_index is not None and record.page_index != int(page_index):
                 continue
             if layer_filter is not None and record.layer not in layer_filter:
+                continue
+            if role_filter is not None and record.role not in role_filter:
+                continue
+            if source_filter is not None and record.annotation_source not in source_filter:
                 continue
             bounds = self._record_bounds(record)
             records.append(
@@ -85,6 +109,8 @@ class SiteModelViewerBinding:
                     label=record.label,
                     notes=record.notes,
                     source_id=record.source_id,
+                    source_kind=record.source_kind,
+                    source_path=record.source_path,
                     layer=record.layer,
                     page_index=record.page_index,
                     selected=record.geometry_id in selected,
@@ -96,6 +122,9 @@ class SiteModelViewerBinding:
             revision=snapshot.revision,
             records=tuple(records),
             bounds=self._combined_bounds(record.bounds for record in records),
+            source_ids=all_source_ids,
+            layers=available_layers,
+            page_indexes=available_pages,
         )
 
     @staticmethod
