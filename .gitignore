@@ -60,3 +60,6 @@ resources/generated_masks/
 *_recovery.zip
 *_debug.zip
 *_rebuild*.zip
+# Local source review / regression transfer packages
+*_source_review.zip
+*_regression_failures.zip
