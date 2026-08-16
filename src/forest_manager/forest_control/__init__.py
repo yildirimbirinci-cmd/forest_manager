@@ -6,6 +6,7 @@ from .service import (
     ForestSnapshot,
     aggregate_capability_matrix,
 )
+from .semantic_api import SemanticControlDescriptor, SemanticForestControlAPI
 
 __all__ = [
     "ForestControlError",
@@ -14,4 +15,6 @@ __all__ = [
     "ForestProperty",
     "ForestSnapshot",
     "aggregate_capability_matrix",
+    "SemanticControlDescriptor",
+    "SemanticForestControlAPI",
 ]
