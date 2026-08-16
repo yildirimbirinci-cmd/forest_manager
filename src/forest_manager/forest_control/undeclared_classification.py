@@ -19,7 +19,7 @@ LEGACY_PLUGIN_FIELDS = {
 
 USER_CONTROL_CANDIDATES = {
     "camdensact", "camdensear", "camdensfar", "camscaact", "collheight", "collpreview",
-    "divers", "divmapchan", "divmapnoise", "divtmap", "drotation", "fastopac", "geomtex",
+    "distmode", "divers", "divmapchan", "divmapnoise", "divtmap", "drotation", "fastopac", "geomtex",
     "hidecustom", "iconSize", "maxdensity", "mirror", "mode", "offset_X", "offset_Y",
     "opaclevel", "pf_efonlyrender", "radius", "randstacked", "renderid", "scalelope",
     "sdgizmo", "seed", "seedtype", "sepsubsplines", "spdensact", "spdensexc", "spdensinc",
