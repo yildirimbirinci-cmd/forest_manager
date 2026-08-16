@@ -1,3 +1,10 @@
+from .forest_pack_execution import (
+    BlockedPlantingDirective,
+    ExecutionBlockReason,
+    ForestPackExecutionPlan,
+    ForestPackExecutionResult,
+    ForestPackPlantingExecutionBridge,
+)
 from .site_context import (
     ContextualSemanticInference,
     GeometrySpatialFacts,
@@ -52,6 +59,12 @@ from .viewer_interaction import SiteModelViewerInteraction, ViewerCorrectionResu
 from .viewer_binding import SiteModelViewerBinding, ViewerBindingSnapshot, ViewerBounds, ViewerRenderRecord
 
 __all__ = [
+    "BlockedPlantingDirective",
+    "ExecutionBlockReason",
+    "ForestPackExecutionPlan",
+    "ForestPackExecutionResult",
+    "ForestPackPlantingExecutionBridge",
+
     "AREA_ROLES",
     "BOUNDARY_ROLES",
     "AnnotationSource",
