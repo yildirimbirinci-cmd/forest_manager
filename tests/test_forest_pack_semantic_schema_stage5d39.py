@@ -17,7 +17,7 @@ def test_stage5d39_curve_boundary_is_preserved():
 
 def test_stage5d39_atomic_array_contracts():
     assert find_semantic_field("geometry", "sources").access == "atomic_adapter_required"
-    assert find_semantic_field("areas", "area_records").access == "atomic_adapter_required"
+    assert find_semantic_field("areas", "area_records").access == "area_record_adapter"
 
 
 def test_stage5d39_raw_coverage_contract():

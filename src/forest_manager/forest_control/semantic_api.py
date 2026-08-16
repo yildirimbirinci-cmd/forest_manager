@@ -55,7 +55,7 @@ class SemanticForestControlAPI:
             return "read_only"
         if access in {"atomic_adapter_required", "geometry_source_record"}:
             return "geometry_adapter"
-        if access == "area_record":
+        if access in {"area_record", "area_record_adapter"}:
             return "area_adapter"
         if access in {"array_group", "synchronized_array_group"}:
             return "array_adapter"

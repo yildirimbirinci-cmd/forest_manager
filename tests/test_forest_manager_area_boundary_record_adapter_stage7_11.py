@@ -97,3 +97,13 @@ def test_area_record_schema_promotes_atomic_adapter():
     from forest_manager.forest_control.schema import find_semantic_field
     field = find_semantic_field("areas", "area_records")
     assert field.access == "area_record_adapter"
+
+
+def test_semantic_api_routes_promoted_area_record_adapter():
+    from forest_manager.forest_control.semantic_api import SemanticForestControlAPI
+
+    api = SemanticForestControlAPI(FakeService())
+    descriptor = api.describe("areas", "area_records", "arwidthlist")
+    assert descriptor.access == "area_record_adapter"
+    assert descriptor.route == "area_adapter"
+    assert descriptor.writable is True
