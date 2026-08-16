@@ -685,6 +685,45 @@ class ForestPackControlService(ForestControlService):
             "verified": True,
         }
 
+
+    def add_geometry_source_by_name(
+        self, forest_name: str, source_node_name: str, *, preflight: bool = True
+    ) -> dict[str, Any]:
+        forest = str(forest_name).strip()
+        source = str(source_node_name).strip()
+        if not forest or not source:
+            raise ForestControlError("Forest and source node names must be non-empty.")
+        if preflight:
+            ensure_current_bridge()
+        command = "|".join((
+            "FOREST_CONTROL_ADD_GEOMETRY_SOURCE",
+            self._token(forest),
+            self._token(source),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_ADD_GEOMETRY_SOURCE")
+        if str(data.get("forest_name") or "") != forest or str(data.get("source_name") or "") != source:
+            raise ForestControlError("Geometry-source insertion identity mismatch.")
+        if data.get("verified") is not True:
+            raise ForestControlError("Geometry-source insertion was not verified.")
+        return data
+
+    def remove_geometry_source_tail(
+        self, forest_name: str, geometry_index: int, *, preflight: bool = True
+    ) -> dict[str, Any]:
+        if isinstance(geometry_index, bool) or not isinstance(geometry_index, int) or geometry_index < 0:
+            raise ForestControlError("Geometry index must be a non-negative integer.")
+        if preflight:
+            ensure_current_bridge()
+        command = "|".join((
+            "FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL",
+            self._token(str(forest_name).strip()),
+            str(geometry_index),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL")
+        if data.get("verified") is not True:
+            raise ForestControlError("Geometry-source rollback was not verified.")
+        return data
+
     def set_array_element(
         self,
         forest_name: str,

@@ -50,8 +50,8 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-8-cproxy-reference-write-20260816a\"}"
+        ",\"bridge_version\":\"0.9.54\"" +
+        ",\"bridge_build_id\":\"stage8-13-atomic-source-area-contract-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -2881,6 +2881,85 @@ struct ForestManagerBridgeState
                 return i
         )
         0
+    ),
+
+    fn addNamedGeometrySourceJson forestName sourceName =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        local forestNode = getNodeByName forestName
+        if forestNode == undefined do throw ("Forest object not found: " + forestName)
+        if not (isKindOf forestNode ::Forest_Pro) do throw ("Node is not Forest Pack: " + forestName)
+        local sourceNode = getNodeByName sourceName
+        if sourceNode == undefined do throw ("Source geometry node not found: " + sourceName)
+        if sourceNode == forestNode do throw "Source geometry cannot be the Forest object."
+        if superClassOf sourceNode == Shape do throw "Source geometry must not be a spline/shape."
+
+        local existingIndex = findGeometrySourceIndexByName forestNode sourceName
+        if existingIndex > 0 then
+        (
+            return "{\"forest_name\":" + (jsonString forestNode.name) +
+                ",\"source_name\":" + (jsonString sourceNode.name) +
+                ",\"geometry_index\":" + (existingIndex as string) +
+                ",\"added\":false,\"verified\":true}"
+        )
+
+        local geometryProps = #(
+            #cobjlist, #namelist, #matlist, #coloridlist, #geomlist,
+            #tempidlist, #tempnamelist, #widthlist, #heightlist, #ScaleList,
+            #zoffsetlist, #radiuslist, #specidlist, #usemeshdimlist,
+            #conamelist, #includechildlist, #keepgrouplist, #nongeomlist,
+            #old_problist, #problist, #centerlist
+        )
+        local oldCounts = rememberGeometryCounts forestNode geometryProps
+        local newIndex = forestNode.cobjlist.count + 1
+        try
+        (
+            setGeometryItemAtIndex forestNode newIndex sourceNode 100.0
+            if forestNode.cobjlist.count != newIndex do throw "Geometry-source insertion count verification failed."
+            if findGeometrySourceIndexByName forestNode sourceName != newIndex do throw "Geometry-source insertion identity verification failed."
+            completeRedraw()
+            "{\"forest_name\":" + (jsonString forestNode.name) +
+            ",\"source_name\":" + (jsonString sourceNode.name) +
+            ",\"geometry_index\":" + (newIndex as string) +
+            ",\"added\":true,\"verified\":true}"
+        )
+        catch
+        (
+            rollbackGeometryCounts forestNode oldCounts
+            throw
+        )
+    ),
+
+    fn removeGeometrySourceTailJson forestName geometryIndex =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        local forestNode = getNodeByName forestName
+        if forestNode == undefined do throw ("Forest object not found: " + forestName)
+        if not (isProperty forestNode #cobjlist) do throw "Forest Pack property missing: cobjlist."
+        local currentCount = forestNode.cobjlist.count
+        if geometryIndex != currentCount do throw "Geometry-source rollback only permits the current tail index."
+        if geometryIndex < 1 do throw "Geometry-source rollback index must be one or greater."
+        local geometryProps = #(
+            #cobjlist, #namelist, #matlist, #coloridlist, #geomlist,
+            #tempidlist, #tempnamelist, #widthlist, #heightlist, #ScaleList,
+            #zoffsetlist, #radiuslist, #specidlist, #usemeshdimlist,
+            #conamelist, #includechildlist, #keepgrouplist, #nongeomlist,
+            #old_problist, #problist, #centerlist
+        )
+        for propName in geometryProps do
+        (
+            if isProperty forestNode propName then
+            (
+                local arr = getProperty forestNode propName
+                if classOf arr == ArrayParameter and arr.count == currentCount do arr.count = currentCount - 1
+            )
+        )
+        if forestNode.cobjlist.count != currentCount - 1 do throw "Geometry-source rollback count verification failed."
+        completeRedraw()
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"removed_index\":" + (geometryIndex as string) +
+        ",\"geometry_count\":" + (forestNode.cobjlist.count as string) +
+        ",\"verified\":true}"
     ),
 
     fn appendT2AssetGeometryJson assetPath probabilityValue =
@@ -6822,6 +6901,38 @@ struct ForestManagerBridgeState
             )
         )
 
+
+        if matchPattern command pattern:"FOREST_CONTROL_ADD_GEOMETRY_SOURCE|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_ADD_GEOMETRY_SOURCE requires forest and source node tokens."
+                local forestName = decodeBase64Utf8 parts[2]
+                local sourceName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_ADD_GEOMETRY_SOURCE\",\"data\":" + addNamedGeometrySourceJson forestName sourceName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_ADD_GEOMETRY_SOURCE" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL requires forest token and one-based tail index."
+                local forestName = decodeBase64Utf8 parts[2]
+                local geometryIndex = parts[3] as integer
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL\",\"data\":" + removeGeometrySourceTailJson forestName geometryIndex + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL" (getCurrentException())
+            )
+        )
 
         if matchPattern command pattern:"FOREST_CONTROL_GET_PROPERTY|*" ignoreCase:true then
         (

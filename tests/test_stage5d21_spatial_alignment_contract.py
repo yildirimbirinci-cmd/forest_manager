@@ -45,5 +45,5 @@ def test_cli_compacts_alignment_output():
 def test_versions_match():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert '"bridge_version":"0.9.53"' in bridge or '\\"bridge_version\\":\\"0.9.53\\"' in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime
+    assert '"bridge_version":"0.9.54"' in bridge or '\\"bridge_version\\":\\"0.9.54\\"' in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in runtime

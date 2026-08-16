@@ -30,6 +30,7 @@ class AreaBoundaryRecord:
 
 @dataclass(frozen=True)
 class AreaBoundaryUpdate:
+    include_exclude: int | None = None
     width: float | None = None
     threshold: float | None = None
     density_falloff: float | None = None
@@ -59,6 +60,7 @@ class AreaBoundaryRecordAdapter:
         "arincexclist",
     )
     MUTABLE_PROPERTIES = {
+        "include_exclude": "arincexclist",
         "width": "arwidthlist",
         "threshold": "arthresholdlist",
         "density_falloff": "arflafdenslist",

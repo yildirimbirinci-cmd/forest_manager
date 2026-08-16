@@ -196,8 +196,8 @@ def test_stage63_bridge_contract_and_stable_startup_loader():
     assert "FOREST_CONTROL_GET_ARRAY_ELEMENT" in bridge_text
     assert "FOREST_CONTROL_SET_ARRAY_SCALAR" in bridge_text
     assert "fn forestControlSetArrayScalarJson" in bridge_text
-    assert "stage6-8-cproxy-reference-write-20260816a" in bridge_text
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage6-8-cproxy-reference-write-20260816a"' in runtime_text
+    assert "stage8-13-atomic-source-area-contract-20260816a" in bridge_text
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-13-atomic-source-area-contract-20260816a"' in runtime_text
     loader_section = runtime_text.split("def _startup_loader_text", 1)[1].split("def install_startup_bridge_loader", 1)[0]
     assert "EXPECTED_BRIDGE_BUILD_ID" not in loader_section
     assert "ForestManager_Bridge.ms" not in loader_section

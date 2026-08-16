@@ -114,7 +114,7 @@ def test_unmatched_lily_is_not_substituted():
 def test_maxscript_reset_command_is_local_to_managed_forest():
     source=(ROOT/"maxscripts"/"ForestManager_Bridge.ms").read_text(encoding="utf-8")
     assert '"RESET_MANAGED_FOREST_FROM_SELECTION"' in source
-    assert '0.9.53' in source
+    assert '0.9.54' in source
     assert 'getNodeByName "FM_Forest_001"' in source
     assert 'FM_Forest_001 exists but is not a Forest Pack object. Refusing to delete it.' in source
 

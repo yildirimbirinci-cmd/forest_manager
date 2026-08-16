@@ -160,10 +160,10 @@ def test_bridge_contract_exposes_stage61_commands_and_build_identity():
     assert "FOREST_CONTROL_GET_PROPERTY" in bridge_text
     assert "FOREST_CONTROL_SET_SCALAR" in bridge_text
     assert "forestControlExplicitReadOnly" in bridge_text
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime_text
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in runtime_text
     build_line = next(line for line in runtime_text.splitlines() if line.startswith("EXPECTED_BRIDGE_BUILD_ID = "))
     build_id = build_line.split('"', 2)[1]
-    assert build_id.startswith("stage6-")
+    assert build_id == "stage8-13-atomic-source-area-contract-20260816a"
     assert build_id in bridge_text
 
 

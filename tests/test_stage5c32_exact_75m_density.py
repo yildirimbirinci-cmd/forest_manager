@@ -19,4 +19,4 @@ def test_bridge_reports_requested_meter_value_and_internal_units():
 
 def test_bridge_version_matches_current_contract():
     s = BRIDGE.read_text(encoding="utf-8")
-    assert "bridge_version" in s and "0.9.53" in s
+    assert "bridge_version" in s and "0.9.54" in s

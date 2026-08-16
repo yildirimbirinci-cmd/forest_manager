@@ -56,4 +56,4 @@ def test_reset_reports_deleted_managed_reference_count():
 
 def test_bridge_version_is_0_9_4():
     s = source()
-    assert '\\"bridge_version\\":\\"0.9.53\\"' in s
+    assert '\\"bridge_version\\":\\"0.9.54\\"' in s

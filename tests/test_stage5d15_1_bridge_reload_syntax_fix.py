@@ -29,5 +29,5 @@ def test_cleanup_still_happens_before_rethrow():
 def test_versions_match_0931():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert "0.9.53" in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime
+    assert "0.9.54" in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in runtime

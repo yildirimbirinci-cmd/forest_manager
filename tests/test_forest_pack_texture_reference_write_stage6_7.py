@@ -8,7 +8,7 @@ import pytest
 import forest_manager.forest_control.service as service_module
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
 
-BUILD = "stage6-8-cproxy-reference-write-20260816a"
+BUILD = "stage8-13-atomic-source-area-contract-20260816a"
 
 
 class FakeTextureReferenceBridge:

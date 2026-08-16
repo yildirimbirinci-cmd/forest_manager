@@ -39,8 +39,8 @@ def test_cli_uses_automatic_preflight():
 def test_bridge_and_runtime_versions_match():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert '0.9.53' in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime
+    assert '0.9.54' in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in runtime
 
 
 def test_density_is_only_reported_not_changed():

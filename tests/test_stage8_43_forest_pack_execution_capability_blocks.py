@@ -1,7 +1,7 @@
 from forest_manager.site_model import ExecutionBlockReason, ForestPackPlantingExecutionBridge, GeometryKind, PlantingPlanningService, SemanticRole, SiteModelService, create_geometry
 
 
-def test_species_and_keep_clear_fail_closed_when_verified_runtime_contract_is_missing():
+def test_species_requires_explicit_source_binding_but_keep_clear_uses_verified_area_mode_switch():
     service = SiteModelService()
     service.upsert_geometry(create_geometry(
         "species",
@@ -24,5 +24,9 @@ def test_species_and_keep_clear_fail_closed_when_verified_runtime_contract_is_mi
     reasons = {item.geometry_id: item.reason for item in execution.blocked}
 
     assert reasons["species"] is ExecutionBlockReason.SPECIES_SOURCE_ASSIGNMENT_UNAVAILABLE
-    assert reasons["clear"] is ExecutionBlockReason.KEEP_CLEAR_AREA_MODE_UNAVAILABLE
+    assert "clear" not in reasons
     assert not any(op.label.startswith("species.") for op in execution.operations)
+    clear_mode = [op for op in execution.operations if op.label == "clear.area[1].include_exclude"]
+    assert len(clear_mode) == 1
+    assert clear_mode[0].property_name == "arincexclist"
+    assert clear_mode[0].value == 1

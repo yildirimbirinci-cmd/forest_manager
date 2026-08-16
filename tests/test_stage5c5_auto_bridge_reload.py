@@ -24,9 +24,9 @@ def test_shared_runtime_uses_project_bridge_file():
     assert '"RELOAD_BRIDGE|" + encoded' in RUNTIME
 
 def test_shared_runtime_verifies_current_bridge_version():
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in RUNTIME
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in RUNTIME
     assert "version == EXPECTED_BRIDGE_VERSION" in RUNTIME
-    assert "bridge_version" in BRIDGE and "0.9.53" in BRIDGE
+    assert "bridge_version" in BRIDGE and "0.9.54" in BRIDGE
 
 def test_reload_cli_delegates_to_shared_preflight():
     assert "ensure_current_bridge" in CLI

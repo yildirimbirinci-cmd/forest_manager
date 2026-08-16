@@ -54,4 +54,4 @@ def test_cli_requests_runtime_units():
 
 def test_bridge_version_is_0_9_12():
     s = source()
-    assert "0.9.53" in s and "bridge_version" in s
+    assert "0.9.54" in s and "bridge_version" in s

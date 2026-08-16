@@ -4,6 +4,7 @@ from .forest_pack_execution import (
     ForestPackExecutionPlan,
     ForestPackExecutionResult,
     ForestPackPlantingExecutionBridge,
+    GeometrySourceInsertion,
 )
 from .site_context import (
     ContextualSemanticInference,
@@ -64,6 +65,7 @@ __all__ = [
     "ForestPackExecutionPlan",
     "ForestPackExecutionResult",
     "ForestPackPlantingExecutionBridge",
+    "GeometrySourceInsertion",
 
     "AREA_ROLES",
     "BOUNDARY_ROLES",
