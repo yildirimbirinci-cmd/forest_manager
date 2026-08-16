@@ -27,4 +27,4 @@ def test_cli_rejects_non_positive_returned_units():
 
 def test_bridge_version_is_0_9_6():
     source = BRIDGE.read_text(encoding="utf-8")
-    assert '\\"bridge_version\\":\\"0.9.39\\"' in source
+    assert '\\"bridge_version\\":\\"0.9.53\\"' in source

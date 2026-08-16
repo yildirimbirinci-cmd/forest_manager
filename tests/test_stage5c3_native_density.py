@@ -36,5 +36,5 @@ def test_cli_defaults_to_exact_75_meters():
 def test_bridge_and_runtime_use_same_current_version():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert "0.9.39" in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.39"' in runtime
+    assert "0.9.53" in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
@@ -49,5 +49,5 @@ def test_cli_preserves_disabled_75m_contract():
 def test_versions_match():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert '"bridge_version":"0.9.39"' in bridge or '\\"bridge_version\\":\\"0.9.39\\"' in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.39"' in runtime
+    assert '"bridge_version":"0.9.53"' in bridge or '\\"bridge_version\\":\\"0.9.53\\"' in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime

@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
@@ -41,8 +41,8 @@ def test_cli_uses_auto_preflight_and_read_only_command():
 def test_bridge_version_and_preflight_match():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert '0.9.39' in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.39"' in runtime
+    assert '0.9.53' in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in runtime
 
 
 def test_density_command_is_not_changed_by_probe_stage():

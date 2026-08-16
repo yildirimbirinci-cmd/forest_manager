@@ -41,4 +41,4 @@ def test_generated_item_probe_is_reported():
     assert "trees.count" in source
 
 def test_bridge_version_matches_current_contract():
-    assert "0.9.39" in BRIDGE.read_text(encoding="utf-8")
+    assert "0.9.53" in BRIDGE.read_text(encoding="utf-8")

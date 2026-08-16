@@ -5,8 +5,8 @@ RUNTIME = (ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py")
 DENSITY = (ROOT / "src" / "forest_manager" / "app" / "density_stage5c3.py").read_text(encoding="utf-8")
 
 def test_current_bridge_identity_is_single_source_of_truth():
-    assert "bridge_version" in BRIDGE and "0.9.39" in BRIDGE
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.39"' in RUNTIME
+    assert "bridge_version" in BRIDGE and "0.9.53" in BRIDGE
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.53"' in RUNTIME
 
 def test_exact_75_meter_density_contract_is_preserved():
     assert "default=75.0" in DENSITY
