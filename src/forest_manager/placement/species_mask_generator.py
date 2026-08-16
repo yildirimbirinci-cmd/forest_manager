@@ -279,3 +279,35 @@ def generate_species_masks(
         "layers": layers,
         "verified": ownership_sum_ok,
     }
+
+
+def generate_species_cluster_masks(
+    output_dir: Path,
+    *,
+    width: int = 512,
+    height: int = 512,
+    seed: int = 58173,
+    blur_radius: float = 4.0,
+    normalized_rings: Iterable[Iterable[tuple[float, float]]] | None = None,
+    specs: tuple[SpeciesMaskSpec, ...] = DEFAULT_SPECS,
+) -> dict:
+    report = generate_species_masks(
+        output_dir,
+        width=width,
+        height=height,
+        seed=seed,
+        blur_radius=blur_radius,
+        normalized_rings=normalized_rings,
+        specs=specs,
+    )
+    result = dict(report)
+    result["policy"] = "deterministic_species_cluster_masks_v2"
+    result["cluster_profile"] = {
+        "seed": seed,
+        "blur_radius_pixels": blur_radius,
+        "exact_primary_coverage": True,
+        "exclusive_primary_ownership": bool(report.get("exclusive_primary_ownership")),
+    }
+    result["verified"] = bool(report.get("verified"))
+    return result
+

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import base64
 import json
@@ -9,8 +9,8 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 49491
-EXPECTED_BRIDGE_VERSION = "0.9.51"
-EXPECTED_BRIDGE_BUILD_ID = "stage5d29-point-cloud-default-20260815a"
+EXPECTED_BRIDGE_VERSION = "0.9.53"
+EXPECTED_BRIDGE_BUILD_ID = "stage5d33-json-endpoint-reload-20260816b"
 
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
@@ -162,3 +162,5 @@ def ensure_current_bridge() -> dict:
         raise RuntimeError(
             "Automatic bridge preflight failed." + startup_note + " Details: " + str(exc)
         ) from exc
+
+

@@ -50,8 +50,8 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.9.51\"" +
-        ",\"bridge_build_id\":\"stage5d29-point-cloud-default-20260815a\"}"
+        ",\"bridge_version\":\"0.9.53\"" +
+        ",\"bridge_build_id\":\"stage5d33-json-endpoint-reload-20260816b\"}"
     ),
 
     fn getDisplayUnitName =
@@ -5955,6 +5955,115 @@ struct ForestManagerBridgeState
         true
     ),
 
+
+    fn forestControlWriteMode value =
+    (
+        local valueClass = safeClassName value
+        if valueClass == "Color" then return "color"
+        if valueClass == "BooleanClass" or valueClass == "Integer" or valueClass == "Integer64" or valueClass == "Float" or valueClass == "Double" or valueClass == "String" or valueClass == "Angle" then return "scalar"
+        "read_only"
+    ),
+
+    fn forestControlArrayMetadataJson value =
+    (
+        local countValue = 0
+        try (countValue = value.count) catch (countValue = 0)
+        local previewCount = countValue
+        if previewCount > 8 do previewCount = 8
+        local classes = #()
+        local elementsJson = "["
+        for i = 1 to previewCount do
+        (
+            local elem = undefined
+            try (elem = value[i]) catch (elem = undefined)
+            local elemClass = safeClassName elem
+            if (findItem classes elemClass) == 0 do append classes elemClass
+            if i > 1 do elementsJson += ","
+            elementsJson += "{\"value_class\":" + (jsonString elemClass) + ",\"preview\":" + (jsonString (safeValuePreview elem)) + "}"
+        )
+        elementsJson += "]"
+        local classesJson = "["
+        for i = 1 to classes.count do
+        (
+            if i > 1 do classesJson += ","
+            classesJson += jsonString classes[i]
+        )
+        classesJson += "]"
+        "{\"count\":" + (countValue as string) + ",\"preview_count\":" + (previewCount as string) + ",\"element_classes\":" + classesJson + ",\"elements\":" + elementsJson + "}"
+    ),
+
+    fn forestControlPropertyJson forestNode propName =
+    (
+        local value = undefined
+        local readOk = true
+        try (value = getProperty forestNode propName) catch (readOk = false)
+        if not readOk then return "{\"name\":" + (jsonString (propName as string)) + ",\"value_class\":\"unreadable\",\"write_mode\":\"read_only\",\"readable\":false}"
+        local valueClass = safeClassName value
+        local writeMode = forestControlWriteMode value
+        local result = "{\"name\":" + (jsonString (propName as string)) + ",\"value_class\":" + (jsonString valueClass) + ",\"write_mode\":" + (jsonString writeMode) + ",\"readable\":true"
+        if valueClass == "ArrayParameter" or valueClass == "Array" then result += ",\"array_metadata\":" + forestControlArrayMetadataJson value else result += ",\"value\":" + safePropertyValueJson forestNode propName
+        result += "}"
+        result
+    ),
+
+    fn getForestControlDiscoveryJson =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        local forests = #()
+        for obj in objects do
+        (
+            local isForest = false
+            try (isForest = isKindOf obj ::Forest_Pro) catch (isForest = false)
+            if isForest do append forests obj
+        )
+        local result = "{\"read_only\":true,\"forest_count\":" + (forests.count as string) + ",\"forests\":["
+        for forestIndex = 1 to forests.count do
+        (
+            local forestNode = forests[forestIndex]
+            local propNames = getPropNames forestNode
+            local readOnlyCount = 0
+            local scalarCount = 0
+            local colorCount = 0
+            local propertiesJson = "["
+            local arraysJson = "["
+            local arrayCount = 0
+            for propIndex = 1 to propNames.count do
+            (
+                local propName = propNames[propIndex]
+                local value = undefined
+                local readOk = true
+                try (value = getProperty forestNode propName) catch (readOk = false)
+                local mode = "read_only"
+                local valueClass = "unreadable"
+                if readOk then
+                (
+                    valueClass = safeClassName value
+                    mode = forestControlWriteMode value
+                )
+                case mode of
+                (
+                    "scalar": scalarCount += 1
+                    "color": colorCount += 1
+                    default: readOnlyCount += 1
+                )
+                if propIndex > 1 do propertiesJson += ","
+                propertiesJson += forestControlPropertyJson forestNode propName
+                if readOk and (valueClass == "ArrayParameter" or valueClass == "Array") then
+                (
+                    arrayCount += 1
+                    if arrayCount > 1 do arraysJson += ","
+                    arraysJson += "{\"name\":" + (jsonString (propName as string)) + ",\"metadata\":" + forestControlArrayMetadataJson value + "}"
+                )
+            )
+            propertiesJson += "]"
+            arraysJson += "]"
+            if forestIndex > 1 do result += ","
+            result += "{\"forest_name\":" + (jsonString forestNode.name) + ",\"property_count\":" + (propNames.count as string) + ",\"write_mode_counts\":{\"read_only\":" + (readOnlyCount as string) + ",\"scalar\":" + (scalarCount as string) + ",\"color\":" + (colorCount as string) + "},\"properties\":" + propertiesJson + ",\"arrays\":" + arraysJson + "}"
+        )
+        result += "],\"verified\":true}"
+        result
+    ),
+
     fn handleCommand rawCommand =
     (
         local cleanCommand = trimLeft (trimRight rawCommand)
@@ -5973,6 +6082,19 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "RELOAD_BRIDGE" (getCurrentException())
+            )
+        )
+
+
+        if command == "FOREST_CONTROL_DISCOVER" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_DISCOVER\",\"data\":" + getForestControlDiscoveryJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_DISCOVER" (getCurrentException())
             )
         )
 
@@ -6814,3 +6936,4 @@ catch()
 
 ForestManagerBridge = ForestManagerBridgeState()
 ForestManagerBridge.start()
+
