@@ -18,6 +18,7 @@ __all__ = [
     "SemanticControlDescriptor",
     "SemanticForestControlAPI",
 ]
+
 from .semantic_transaction import (
     SemanticScalarChange,
     SemanticTransactionManager,
@@ -28,4 +29,11 @@ __all__ += [
     "SemanticScalarChange",
     "SemanticTransactionManager",
     "SemanticTransactionResult",
+]
+
+from .general_control import ForestControlEngine, ForestControlSnapshot
+
+__all__ += [
+    "ForestControlEngine",
+    "ForestControlSnapshot",
 ]
