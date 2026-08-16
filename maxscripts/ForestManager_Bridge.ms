@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-2-typed-color-write-20260816a\"}"
+        ",\"bridge_build_id\":\"stage6-3-array-scalar-write-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6128,6 +6128,105 @@ struct ForestManagerBridgeState
         )
     ),
 
+    fn forestControlArrayScalarValueJson value =
+    (
+        local valueClass = safeClassName value
+        if valueClass == "BooleanClass" then return (boolJson value)
+        if valueClass == "Integer" or valueClass == "Integer64" or valueClass == "Float" or valueClass == "Double" then return (value as string)
+        if valueClass == "String" then return (jsonString value)
+        throw ("Unsupported Forest control array scalar class: " + valueClass)
+    ),
+
+    fn forestControlGetArrayElementJson forestName propertyName zeroIndex =
+    (
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local arr = undefined
+        local readOk = true
+        try (arr = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control array property is unreadable: " + propertyName)
+        local arrayClass = safeClassName arr
+        if arrayClass != "ArrayParameter" and arrayClass != "Array" do
+            throw ("Forest control property is not an array: " + propertyName + " class=" + arrayClass)
+        if zeroIndex < 0 do throw "Forest control array index must be zero or greater."
+        local countValue = arr.count
+        if zeroIndex >= countValue do
+            throw ("Forest control array index out of range: " + propertyName + " index=" + (zeroIndex as string) + " count=" + (countValue as string))
+        local maxIndex = zeroIndex + 1
+        local value = undefined
+        local elementReadOk = true
+        try (value = arr[maxIndex]) catch (elementReadOk = false)
+        if not elementReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local valueClass = safeClassName value
+        local scalarType = forestControlScalarFamily valueClass
+        if scalarType == "" do throw ("Forest control array element is not scalar writable: " + propertyName + "[" + (zeroIndex as string) + "] class=" + valueClass)
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"index\":" + (zeroIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"value_class\":" + (jsonString valueClass) +
+        ",\"scalar_type\":" + (jsonString scalarType) +
+        ",\"value\":" + (forestControlArrayScalarValueJson value) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlSetArrayScalarJson forestName propertyName zeroIndex scalarType encodedValue =
+    (
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local arr = undefined
+        local readOk = true
+        try (arr = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control array property is unreadable: " + propertyName)
+        local arrayClass = safeClassName arr
+        if arrayClass != "ArrayParameter" and arrayClass != "Array" do
+            throw ("Forest control property is not an array: " + propertyName + " class=" + arrayClass)
+        if zeroIndex < 0 do throw "Forest control array index must be zero or greater."
+        local countValue = arr.count
+        if zeroIndex >= countValue do
+            throw ("Forest control array index out of range: " + propertyName + " index=" + (zeroIndex as string) + " count=" + (countValue as string))
+        local maxIndex = zeroIndex + 1
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = arr[maxIndex]) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local beforeClass = safeClassName beforeValue
+        local expectedFamily = forestControlScalarFamily beforeClass
+        if expectedFamily == "" do throw ("Forest control array element is not scalar writable: " + propertyName + "[" + (zeroIndex as string) + "] class=" + beforeClass)
+        if scalarType != expectedFamily do throw ("Array scalar type mismatch for " + propertyName + "[" + (zeroIndex as string) + "]: expected " + expectedFamily + ", got " + scalarType)
+        local beforeJson = forestControlArrayScalarValueJson beforeValue
+        local newValue = parseForestControlScalar scalarType encodedValue
+        arr[maxIndex] = newValue
+        refreshForestPreviewNode forestNode
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = arr[maxIndex]) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control array element readback failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local afterClass = safeClassName afterValue
+        local afterFamily = forestControlScalarFamily afterClass
+        local verified = false
+        if scalarType == "float" then
+        (
+            try (verified = (abs ((afterValue as float) - (newValue as float))) <= 0.000001) catch (verified = false)
+        )
+        else
+        (
+            try (verified = (afterValue == newValue)) catch (verified = false)
+        )
+        if afterFamily != expectedFamily do verified = false
+        if arr.count != countValue do verified = false
+        if not verified do throw ("Forest control array scalar write verification failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"index\":" + (zeroIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"value_class\":" + (jsonString afterClass) +
+        ",\"scalar_type\":" + (jsonString scalarType) +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + (forestControlArrayScalarValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
     fn forestControlSetScalarJson forestName propertyName scalarType encodedValue =
     (
         local forestNode = findForestControlNode forestName
@@ -6251,6 +6350,42 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "FOREST_CONTROL_GET_PROPERTY" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_GET_ARRAY_ELEMENT|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 4 do throw "FOREST_CONTROL_GET_ARRAY_ELEMENT requires forest, property and zero-based index."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local zeroIndex = parts[4] as integer
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_GET_ARRAY_ELEMENT\",\"data\":" + forestControlGetArrayElementJson forestName propertyName zeroIndex + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_GET_ARRAY_ELEMENT" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_SCALAR|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FOREST_CONTROL_SET_ARRAY_SCALAR requires forest, property, zero-based index, type and value."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local zeroIndex = parts[4] as integer
+                local scalarType = toLower parts[5]
+                local encodedValue = parts[6]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_ARRAY_SCALAR\",\"data\":" + forestControlSetArrayScalarJson forestName propertyName zeroIndex scalarType encodedValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_ARRAY_SCALAR" (getCurrentException())
             )
         )
 

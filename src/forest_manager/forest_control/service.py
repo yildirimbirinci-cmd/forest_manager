@@ -89,7 +89,7 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Forest Pack discovery plus verified scalar/color write and rollback endpoints."""
+    """Forest Pack discovery plus verified scalar/color/array-scalar write and rollback endpoints."""
 
     EXPLICIT_RUNTIME_READ_ONLY = {"geomtexid", "fastopac", "renderid", "divtmap", "geomtex"}
     SCALAR_CLASS_FAMILIES = {
@@ -245,6 +245,114 @@ class ForestPackControlService(ForestControlService):
             "verified": True,
         }
 
+
+    def get_array_element(
+        self,
+        forest_name: str,
+        property_name: str,
+        index: int,
+        *,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ForestControlError("Array element index must be an integer.")
+        if index < 0:
+            raise ForestControlError("Array element index must be zero or greater.")
+        if preflight:
+            ensure_current_bridge()
+        command = "|".join((
+            "FOREST_CONTROL_GET_ARRAY_ELEMENT",
+            self._token(forest_name),
+            self._token(property_name),
+            str(index),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_GET_ARRAY_ELEMENT")
+        if str(data.get("forest_name") or "") != forest_name:
+            raise ForestControlError("FOREST_CONTROL_GET_ARRAY_ELEMENT forest identity mismatch.")
+        if str(data.get("property_name") or "") != property_name:
+            raise ForestControlError("FOREST_CONTROL_GET_ARRAY_ELEMENT property identity mismatch.")
+        if int(data.get("index", -1)) != index:
+            raise ForestControlError("FOREST_CONTROL_GET_ARRAY_ELEMENT index mismatch.")
+        if data.get("verified") is not True:
+            raise ForestControlError(f"Forest array element read was not verified: {forest_name}.{property_name}[{index}]")
+        return data
+
+    def _send_array_scalar(
+        self,
+        forest_name: str,
+        property_name: str,
+        index: int,
+        value: bool | int | float | str,
+        *,
+        value_class: str,
+        preflight: bool,
+    ) -> dict[str, Any]:
+        if preflight:
+            ensure_current_bridge()
+        scalar_type, encoded_text = self._scalar_type_for(value_class, value)
+        command = "|".join((
+            "FOREST_CONTROL_SET_ARRAY_SCALAR",
+            self._token(forest_name),
+            self._token(property_name),
+            str(index),
+            scalar_type,
+            self._token(encoded_text),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_SET_ARRAY_SCALAR")
+        if data.get("verified") is not True:
+            raise ForestControlError(
+                f"Forest array scalar write was not verified: {forest_name}.{property_name}[{index}]"
+            )
+        readback = self.get_array_element(forest_name, property_name, index, preflight=False)
+        if str(readback.get("value_class") or "") != value_class:
+            raise ForestControlError(
+                f"Forest array scalar readback class mismatch: {forest_name}.{property_name}[{index}]"
+            )
+        if not self._values_match(readback.get("value"), value, scalar_type):
+            raise ForestControlError(
+                f"Forest array scalar readback mismatch: {forest_name}.{property_name}[{index}]"
+            )
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "index": index,
+            "value_class": value_class,
+            "scalar_type": scalar_type,
+            "before_value": data.get("before_value"),
+            "after_value": readback.get("value"),
+            "verified": True,
+        }
+
+    def set_array_element(
+        self,
+        forest_name: str,
+        property_name: str,
+        index: int,
+        value: Any,
+        *,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        before = self.get_array_element(forest_name, property_name, index, preflight=preflight)
+        value_class = str(before.get("value_class") or "")
+        self._scalar_type_for(value_class, value)
+        result = self._send_array_scalar(
+            forest_name,
+            property_name,
+            index,
+            value,
+            value_class=value_class,
+            preflight=False,
+        )
+        self._rollback_journal.append({
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "index": index,
+            "value_class": value_class,
+            "write_mode": "array_scalar",
+            "value": before.get("value"),
+        })
+        return result
+
     def set_property(
         self,
         forest_name: str,
@@ -288,11 +396,21 @@ class ForestPackControlService(ForestControlService):
         restored = 0
         try:
             for entry in pending:
-                if str(entry.get("write_mode") or "scalar") == "color":
+                write_mode = str(entry.get("write_mode") or "scalar")
+                if write_mode == "color":
                     result = self._send_color(
                         str(entry["forest_name"]),
                         str(entry["property_name"]),
                         entry["value"],
+                        preflight=(restored == 0),
+                    )
+                elif write_mode == "array_scalar":
+                    result = self._send_array_scalar(
+                        str(entry["forest_name"]),
+                        str(entry["property_name"]),
+                        int(entry["index"]),
+                        entry["value"],
+                        value_class=str(entry["value_class"]),
                         preflight=(restored == 0),
                     )
                 else:
@@ -303,12 +421,15 @@ class ForestPackControlService(ForestControlService):
                         value_class=str(entry["value_class"]),
                         preflight=(restored == 0),
                     )
-                results.append({
+                step = {
                     "forest_name": entry["forest_name"],
                     "property_name": entry["property_name"],
                     "restored": entry["value"],
                     "verified": bool(result.get("verified")),
-                })
+                }
+                if write_mode == "array_scalar":
+                    step["index"] = int(entry["index"])
+                results.append(step)
                 restored += 1
         except Exception:
             remaining_original_order = list(reversed(pending[restored:]))
