@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-3-array-scalar-write-20260816a\"}"
+        ",\"bridge_build_id\":\"stage6-4-point3-array-write-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6159,14 +6159,29 @@ struct ForestManagerBridgeState
         if not elementReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
         local valueClass = safeClassName value
         local scalarType = forestControlScalarFamily valueClass
-        if scalarType == "" do throw ("Forest control array element is not scalar writable: " + propertyName + "[" + (zeroIndex as string) + "] class=" + valueClass)
+        local vectorType = ""
+        local valueJson = ""
+        if scalarType != "" then
+        (
+            valueJson = forestControlArrayScalarValueJson value
+        )
+        else if valueClass == "Point3" then
+        (
+            vectorType = "point3"
+            valueJson = "[" + (value.x as string) + "," + (value.y as string) + "," + (value.z as string) + "]"
+        )
+        else
+        (
+            throw ("Forest control array element is not writable by a verified endpoint: " + propertyName + "[" + (zeroIndex as string) + "] class=" + valueClass)
+        )
         "{\"forest_name\":" + (jsonString forestNode.name) +
         ",\"property_name\":" + (jsonString propertyName) +
         ",\"index\":" + (zeroIndex as string) +
         ",\"count\":" + (countValue as string) +
         ",\"value_class\":" + (jsonString valueClass) +
         ",\"scalar_type\":" + (jsonString scalarType) +
-        ",\"value\":" + (forestControlArrayScalarValueJson value) +
+        ",\"vector_type\":" + (jsonString vectorType) +
+        ",\"value\":" + valueJson +
         ",\"verified\":true}"
     ),
 
@@ -6224,6 +6239,63 @@ struct ForestManagerBridgeState
         ",\"scalar_type\":" + (jsonString scalarType) +
         ",\"before_value\":" + beforeJson +
         ",\"after_value\":" + (forestControlArrayScalarValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlPoint3Json value =
+    (
+        "[" + (value.x as string) + "," + (value.y as string) + "," + (value.z as string) + "]"
+    ),
+
+    fn forestControlSetArrayPoint3Json forestName propertyName zeroIndex xValue yValue zValue =
+    (
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local arr = undefined
+        local readOk = true
+        try (arr = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control array property is unreadable: " + propertyName)
+        local arrayClass = safeClassName arr
+        if arrayClass != "ArrayParameter" and arrayClass != "Array" do
+            throw ("Forest control property is not an array: " + propertyName + " class=" + arrayClass)
+        if zeroIndex < 0 do throw "Forest control array index must be zero or greater."
+        local countValue = arr.count
+        if zeroIndex >= countValue do
+            throw ("Forest control array index out of range: " + propertyName + " index=" + (zeroIndex as string) + " count=" + (countValue as string))
+        local maxIndex = zeroIndex + 1
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = arr[maxIndex]) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local beforeClass = safeClassName beforeValue
+        if beforeClass != "Point3" do throw ("Forest control array element is not Point3 writable: " + propertyName + "[" + (zeroIndex as string) + "] class=" + beforeClass)
+        local beforeJson = forestControlPoint3Json beforeValue
+        local newValue = [xValue, yValue, zValue]
+        arr[maxIndex] = newValue
+        refreshForestPreviewNode forestNode
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = arr[maxIndex]) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control array Point3 readback failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local verified = false
+        try
+        (
+            verified = (safeClassName afterValue == "Point3") and
+                (abs ((afterValue.x as float) - xValue) <= 0.00001) and
+                (abs ((afterValue.y as float) - yValue) <= 0.00001) and
+                (abs ((afterValue.z as float) - zValue) <= 0.00001) and
+                (arr.count == countValue)
+        )
+        catch (verified = false)
+        if not verified do throw ("Forest control array Point3 write verification failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"index\":" + (zeroIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"value_class\":\"Point3\"" +
+        ",\"vector_type\":\"point3\"" +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + (forestControlPoint3Json afterValue) +
         ",\"verified\":true}"
     ),
 
@@ -6367,6 +6439,26 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "FOREST_CONTROL_GET_ARRAY_ELEMENT" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_POINT3|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 7 do throw "FOREST_CONTROL_SET_ARRAY_POINT3 requires forest, property, zero-based index and XYZ values."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local zeroIndex = parts[4] as integer
+                local xValue = parts[5] as float
+                local yValue = parts[6] as float
+                local zValue = parts[7] as float
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_ARRAY_POINT3\",\"data\":" + forestControlSetArrayPoint3Json forestName propertyName zeroIndex xValue yValue zValue + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_ARRAY_POINT3" (getCurrentException())
             )
         )
 

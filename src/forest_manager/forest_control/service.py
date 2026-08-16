@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 
 from dataclasses import dataclass
+import math
 from typing import Any
 
 from forest_manager.max_bridge.runtime_bridge import ensure_current_bridge, send_command
@@ -89,7 +90,7 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Forest Pack discovery plus verified scalar/color/array-scalar write and rollback endpoints."""
+    """Forest Pack discovery plus verified scalar/color/array scalar/Point3 write and rollback endpoints."""
 
     EXPLICIT_RUNTIME_READ_ONLY = {"geomtexid", "fastopac", "renderid", "divtmap", "geomtex"}
     SCALAR_CLASS_FAMILIES = {
@@ -160,6 +161,29 @@ class ForestPackControlService(ForestControlService):
         except ForestControlError:
             return False
         return all(abs(a - b) <= 1e-4 for a, b in zip(actual_rgb, expected_rgb))
+
+    @staticmethod
+    def _normalize_point3(value: Any) -> tuple[float, float, float]:
+        if not isinstance(value, (list, tuple)) or len(value) != 3:
+            raise ForestControlError("Point3 array element requires a list/tuple with exactly 3 numeric components.")
+        components: list[float] = []
+        for component in value:
+            if isinstance(component, bool) or not isinstance(component, (int, float)):
+                raise ForestControlError("Point3 array element requires numeric components.")
+            numeric = float(component)
+            if not math.isfinite(numeric):
+                raise ForestControlError("Point3 array element components must be finite numbers.")
+            components.append(numeric)
+        return tuple(components)
+
+    @classmethod
+    def _point3_match(cls, actual: Any, expected: Any) -> bool:
+        try:
+            actual_xyz = cls._normalize_point3(actual)
+            expected_xyz = cls._normalize_point3(expected)
+        except ForestControlError:
+            return False
+        return all(abs(a - b) <= 1e-5 for a, b in zip(actual_xyz, expected_xyz))
 
     def get_property(self, forest_name: str, property_name: str, *, preflight: bool = True) -> dict[str, Any]:
         if preflight:
@@ -323,6 +347,52 @@ class ForestPackControlService(ForestControlService):
             "verified": True,
         }
 
+    def _send_array_point3(
+        self,
+        forest_name: str,
+        property_name: str,
+        index: int,
+        value: Any,
+        *,
+        preflight: bool,
+    ) -> dict[str, Any]:
+        if preflight:
+            ensure_current_bridge()
+        xyz = self._normalize_point3(value)
+        command = "|".join((
+            "FOREST_CONTROL_SET_ARRAY_POINT3",
+            self._token(forest_name),
+            self._token(property_name),
+            str(index),
+            repr(xyz[0]),
+            repr(xyz[1]),
+            repr(xyz[2]),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_SET_ARRAY_POINT3")
+        if data.get("verified") is not True:
+            raise ForestControlError(
+                f"Forest array Point3 write was not verified: {forest_name}.{property_name}[{index}]"
+            )
+        readback = self.get_array_element(forest_name, property_name, index, preflight=False)
+        if str(readback.get("value_class") or "") != "Point3":
+            raise ForestControlError(
+                f"Forest array Point3 readback class mismatch: {forest_name}.{property_name}[{index}]"
+            )
+        if not self._point3_match(readback.get("value"), xyz):
+            raise ForestControlError(
+                f"Forest array Point3 readback mismatch: {forest_name}.{property_name}[{index}]"
+            )
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "index": index,
+            "value_class": "Point3",
+            "vector_type": "point3",
+            "before_value": data.get("before_value"),
+            "after_value": readback.get("value"),
+            "verified": True,
+        }
+
     def set_array_element(
         self,
         forest_name: str,
@@ -334,21 +404,29 @@ class ForestPackControlService(ForestControlService):
     ) -> dict[str, Any]:
         before = self.get_array_element(forest_name, property_name, index, preflight=preflight)
         value_class = str(before.get("value_class") or "")
-        self._scalar_type_for(value_class, value)
-        result = self._send_array_scalar(
-            forest_name,
-            property_name,
-            index,
-            value,
-            value_class=value_class,
-            preflight=False,
-        )
+        if value_class == "Point3":
+            self._normalize_point3(value)
+            result = self._send_array_point3(
+                forest_name, property_name, index, value, preflight=False
+            )
+            write_mode = "array_point3"
+        else:
+            self._scalar_type_for(value_class, value)
+            result = self._send_array_scalar(
+                forest_name,
+                property_name,
+                index,
+                value,
+                value_class=value_class,
+                preflight=False,
+            )
+            write_mode = "array_scalar"
         self._rollback_journal.append({
             "forest_name": forest_name,
             "property_name": property_name,
             "index": index,
             "value_class": value_class,
-            "write_mode": "array_scalar",
+            "write_mode": write_mode,
             "value": before.get("value"),
         })
         return result
@@ -413,6 +491,14 @@ class ForestPackControlService(ForestControlService):
                         value_class=str(entry["value_class"]),
                         preflight=(restored == 0),
                     )
+                elif write_mode == "array_point3":
+                    result = self._send_array_point3(
+                        str(entry["forest_name"]),
+                        str(entry["property_name"]),
+                        int(entry["index"]),
+                        entry["value"],
+                        preflight=(restored == 0),
+                    )
                 else:
                     result = self._send_scalar(
                         str(entry["forest_name"]),
@@ -427,7 +513,7 @@ class ForestPackControlService(ForestControlService):
                     "restored": entry["value"],
                     "verified": bool(result.get("verified")),
                 }
-                if write_mode == "array_scalar":
+                if write_mode in {"array_scalar", "array_point3"}:
                     step["index"] = int(entry["index"])
                 results.append(step)
                 restored += 1
@@ -543,7 +629,7 @@ def aggregate_capability_matrix(snapshots: tuple[ForestSnapshot, ...]) -> dict[s
         "policy": {
             "scalar": "read_write_transactional",
             "color": "read_write_transactional",
-            "array_parameter": "typed_discovery_read_only",
+            "array_parameter": "primitive_scalar_and_point3_element_write",
             "node_material_reference_arrays": "read_only_until_specialized_adapter",
             "curve_control": "read_only_verified_runtime_boundary",
         },
