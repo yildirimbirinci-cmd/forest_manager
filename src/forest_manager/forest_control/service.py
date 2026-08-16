@@ -90,11 +90,12 @@ class ForestControlService:
 
 
 class ForestPackControlService(ForestControlService):
-    """Forest Pack discovery plus verified scalar/color/array scalar/Point3/node/material-reference write and rollback endpoints."""
+    """Forest Pack discovery plus verified scalar/color/array/reference/texture write and rollback endpoints."""
 
     EXPLICIT_RUNTIME_READ_ONLY = {"geomtexid", "fastopac", "renderid", "divtmap", "geomtex"}
     NODE_REFERENCE_ARRAY_PROPERTIES = {"arnodelist"}
     MATERIAL_REFERENCE_ARRAY_PROPERTIES = {"matlist"}
+    TEXTURE_REFERENCE_PROPERTIES = {"distmap"}
     SCALAR_CLASS_FAMILIES = {
         "BooleanClass": "bool",
         "Integer": "int",
@@ -510,6 +511,94 @@ class ForestPackControlService(ForestControlService):
             "verified": True,
         }
 
+    @staticmethod
+    def _normalize_texture_reference(value: Any) -> str | None:
+        if value is None:
+            return None
+        if not isinstance(value, str) or not value.strip():
+            raise ForestControlError("Texture reference property requires a non-empty AnimHandle or bitmap filename token, or None.")
+        return value.strip()
+
+    def get_texture_reference(
+        self,
+        forest_name: str,
+        property_name: str = "distmap",
+        *,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        if property_name.lower() not in self.TEXTURE_REFERENCE_PROPERTIES:
+            raise ForestControlError(f"Texture reference writes are not enabled for: {property_name}")
+        if preflight:
+            ensure_current_bridge()
+        command = "|".join((
+            "FOREST_CONTROL_GET_TEXTURE_REF",
+            self._token(forest_name),
+            self._token(property_name),
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_GET_TEXTURE_REF")
+        if data.get("verified") is not True:
+            raise ForestControlError(f"Forest texture reference read was not verified: {forest_name}.{property_name}")
+        if str(data.get("forest_name") or "") != forest_name or str(data.get("property_name") or "") != property_name:
+            raise ForestControlError("FOREST_CONTROL_GET_TEXTURE_REF identity mismatch.")
+        if str(data.get("reference_type") or "") != "texture":
+            raise ForestControlError(f"Forest texture reference type mismatch: {forest_name}.{property_name}")
+        return data
+
+    def _send_texture_reference(
+        self,
+        forest_name: str,
+        property_name: str,
+        value: str | None,
+        *,
+        preflight: bool,
+    ) -> dict[str, Any]:
+        if property_name.lower() not in self.TEXTURE_REFERENCE_PROPERTIES:
+            raise ForestControlError(f"Texture reference writes are not enabled for: {property_name}")
+        if preflight:
+            ensure_current_bridge()
+        reference = self._normalize_texture_reference(value)
+        if reference is None:
+            mode = "null"
+            token = "NONE"
+        elif reference.lower().startswith("anim:"):
+            handle_text = reference[5:].strip()
+            if handle_text[-1:].lower() in {"p", "l"}:
+                handle_text = handle_text[:-1]
+            if not handle_text.isdigit() or int(handle_text) <= 0:
+                raise ForestControlError(f"Invalid texture AnimHandle token: {reference}")
+            reference = f"anim:{int(handle_text)}"
+            mode = "anim"
+            token = self._token(reference)
+        else:
+            mode = "bitmap"
+            token = self._token(reference)
+        command = "|".join((
+            "FOREST_CONTROL_SET_TEXTURE_REF",
+            self._token(forest_name),
+            self._token(property_name),
+            mode,
+            token,
+        ))
+        data = _require_ok(send_command(command), "FOREST_CONTROL_SET_TEXTURE_REF")
+        if data.get("verified") is not True:
+            raise ForestControlError(f"Forest texture reference write was not verified: {forest_name}.{property_name}")
+        readback = self.get_texture_reference(forest_name, property_name, preflight=False)
+        if mode == "bitmap":
+            matches = readback.get("filename") == reference
+        else:
+            matches = readback.get("value") == reference
+        if not matches:
+            raise ForestControlError(f"Forest texture reference readback mismatch: {forest_name}.{property_name}")
+        return {
+            "forest_name": forest_name,
+            "property_name": property_name,
+            "value_class": str(readback.get("value_class") or ""),
+            "reference_type": "texture",
+            "before_value": data.get("before_value"),
+            "after_value": readback.get("value"),
+            "verified": True,
+        }
+
     def set_array_element(
         self,
         forest_name: str,
@@ -571,6 +660,18 @@ class ForestPackControlService(ForestControlService):
     ) -> dict[str, Any]:
         if property_name.lower() in self.EXPLICIT_RUNTIME_READ_ONLY:
             raise ForestControlError(f"Forest property is explicitly read-only: {property_name}")
+        if property_name.lower() in self.TEXTURE_REFERENCE_PROPERTIES:
+            before_texture = self.get_texture_reference(forest_name, property_name, preflight=preflight)
+            self._normalize_texture_reference(value)
+            result = self._send_texture_reference(forest_name, property_name, value, preflight=False)
+            self._rollback_journal.append({
+                "forest_name": forest_name,
+                "property_name": property_name,
+                "value_class": str(before_texture.get("value_class") or ""),
+                "write_mode": "texture_ref",
+                "value": before_texture.get("value"),
+            })
+            return result
         before = self.get_property(forest_name, property_name, preflight=preflight)
         write_mode = str(before.get("write_mode") or "")
         value_class = str(before.get("value_class") or "")
@@ -605,7 +706,14 @@ class ForestPackControlService(ForestControlService):
         try:
             for entry in pending:
                 write_mode = str(entry.get("write_mode") or "scalar")
-                if write_mode == "color":
+                if write_mode == "texture_ref":
+                    result = self._send_texture_reference(
+                        str(entry["forest_name"]),
+                        str(entry["property_name"]),
+                        entry["value"],
+                        preflight=(restored == 0),
+                    )
+                elif write_mode == "color":
                     result = self._send_color(
                         str(entry["forest_name"]),
                         str(entry["property_name"]),

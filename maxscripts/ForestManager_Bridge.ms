@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-6-material-reference-write-20260816a\"}"
+        ",\"bridge_build_id\":\"stage6-7-texture-animhandle-decimal-fix-20260816d\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6153,6 +6153,164 @@ struct ForestManagerBridgeState
         matches
     ),
 
+    fn forestControlIsTextureReference value =
+    (
+        if value == undefined then return false
+        local valueClass = safeClassName value
+        valueClass == "Bitmaptexture"
+    ),
+
+    fn forestControlTextureFilename value =
+    (
+        if value == undefined then return ""
+        if not (forestControlIsTextureReference value) do return ""
+        local filename = ""
+        try (filename = value.filename) catch (filename = "")
+        filename
+    ),
+
+    fn forestControlTextureAnimHandle value =
+    (
+        if value == undefined then return 0
+        if not (forestControlIsTextureReference value) do return 0
+        local handle = 0
+        try (handle = GetHandleByAnim value) catch (handle = 0)
+        handle
+    ),
+
+    fn forestControlTextureReferenceToken value =
+    (
+        if value == undefined then return ""
+        if not (forestControlIsTextureReference value) do
+            throw ("Forest control texture reference is not a Bitmaptexture: " + (safeClassName value))
+        local handle = forestControlTextureAnimHandle value
+        if handle <= 0 do throw "Forest control Bitmaptexture AnimHandle is unavailable."
+        "anim:" + ((handle as integer) as string)
+    ),
+
+    fn forestControlTextureReferenceValueJson value =
+    (
+        if value == undefined then return "null"
+        jsonString (forestControlTextureReferenceToken value)
+    ),
+
+    fn forestControlFindBitmapTextureByFilename filename =
+    (
+        if filename == "" do return undefined
+        local target = toLower filename
+        local candidates = #()
+        try (candidates = getClassInstances Bitmaptexture) catch (candidates = #())
+        for tex in candidates where tex != undefined do
+        (
+            local candidateFilename = forestControlTextureFilename tex
+            if candidateFilename != "" and (toLower candidateFilename) == target do return tex
+        )
+        for obj in objects do
+        (
+            local isForest = false
+            try (isForest = isKindOf obj ::Forest_Pro) catch (isForest = false)
+            if isForest and isProperty obj #distmap then
+            (
+                local tex = undefined
+                try (tex = obj.distmap) catch (tex = undefined)
+                if tex != undefined then
+                (
+                    local candidateFilename = forestControlTextureFilename tex
+                    if candidateFilename != "" and (toLower candidateFilename) == target do return tex
+                )
+            )
+        )
+        undefined
+    ),
+
+    fn forestControlFindBitmapTextureByAnimHandle handle =
+    (
+        if handle <= 0 do return undefined
+        local value = undefined
+        try (value = GetAnimByHandle handle) catch (value = undefined)
+        if value == undefined then return undefined
+        if not (forestControlIsTextureReference value) do return undefined
+        value
+    ),
+
+    fn forestControlGetTextureReferenceJson forestName propertyName =
+    (
+        if (toLower propertyName) != "distmap" do
+            throw ("Texture reference writes are not enabled for: " + propertyName)
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local value = undefined
+        local readOk = true
+        try (value = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control texture property is unreadable: " + propertyName)
+        if value != undefined and not (forestControlIsTextureReference value) do
+            throw ("Forest control property is not a Bitmaptexture reference: " + propertyName + " class=" + (safeClassName value))
+        local filename = if value == undefined then "" else forestControlTextureFilename value
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"value_class\":" + (jsonString (safeClassName value)) +
+        ",\"reference_type\":\"texture\"" +
+        ",\"value\":" + (forestControlTextureReferenceValueJson value) +
+        ",\"filename\":" + (jsonString filename) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlSetTextureReferenceJson forestName propertyName referenceMode encodedTextureToken =
+    (
+        if (toLower propertyName) != "distmap" do
+            throw ("Texture reference writes are not enabled for: " + propertyName)
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = getProperty forestNode propName) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control texture property is unreadable: " + propertyName)
+        if beforeValue != undefined and not (forestControlIsTextureReference beforeValue) do
+            throw ("Forest control property is not a Bitmaptexture reference: " + propertyName + " class=" + (safeClassName beforeValue))
+        local beforeJson = forestControlTextureReferenceValueJson beforeValue
+        local newValue = undefined
+        if referenceMode == "anim" then
+        (
+            local textureToken = decodeBase64Utf8 encodedTextureToken
+            if textureToken == "" do throw "Texture reference AnimHandle token cannot be empty."
+            if not matchPattern textureToken pattern:"anim:*" ignoreCase:true do
+                throw ("Unsupported texture reference token: " + textureToken)
+            local handleText = substring textureToken 6 (textureToken.count - 5)
+            local handle = 0
+            try (handle = handleText as integer) catch (handle = 0)
+            if handle <= 0 do throw ("Invalid texture reference AnimHandle token: " + textureToken)
+            newValue = forestControlFindBitmapTextureByAnimHandle handle
+            if newValue == undefined do throw ("Texture reference target was not found: " + textureToken)
+        )
+        else if referenceMode == "bitmap" then
+        (
+            local textureFilename = decodeBase64Utf8 encodedTextureToken
+            if textureFilename == "" do throw "Texture reference filename token cannot be empty."
+            newValue = forestControlFindBitmapTextureByFilename textureFilename
+            if newValue == undefined do throw ("Texture reference target was not found: " + textureFilename)
+        )
+        else if referenceMode != "null" then
+        (
+            throw ("Unsupported texture reference mode: " + referenceMode)
+        )
+        setProperty forestNode propName newValue
+        refreshForestPreviewNode forestNode
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = getProperty forestNode propName) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control texture reference readback failed: " + propertyName)
+        local verified = false
+        if newValue == undefined then verified = (afterValue == undefined)
+        else verified = (afterValue == newValue)
+        if not verified do throw ("Forest control texture reference write verification failed: " + propertyName)
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"reference_type\":\"texture\"" +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + (forestControlTextureReferenceValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
     fn forestControlGetArrayElementJson forestName propertyName zeroIndex =
     (
         local forestNode = findForestControlNode forestName
@@ -6624,6 +6782,40 @@ struct ForestManagerBridgeState
             )
         )
 
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_TEXTURE_REF|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 5 do throw "FOREST_CONTROL_SET_TEXTURE_REF requires forest, property, mode and texture reference token."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local referenceMode = parts[4]
+                local encodedTextureFilename = parts[5]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_TEXTURE_REF\",\"data\":" + forestControlSetTextureReferenceJson forestName propertyName referenceMode encodedTextureFilename + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_TEXTURE_REF" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_GET_TEXTURE_REF|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FOREST_CONTROL_GET_TEXTURE_REF requires forest and property."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_GET_TEXTURE_REF\",\"data\":" + forestControlGetTextureReferenceJson forestName propertyName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_GET_TEXTURE_REF" (getCurrentException())
+            )
+        )
 
         if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_MATERIAL_REF|*" ignoreCase:true then
         (

@@ -9,7 +9,7 @@ import forest_manager.forest_control.service as service_module
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
 
 
-BUILD = "stage6-6-material-reference-write-20260816a"
+BUILD = "stage6-7-texture-animhandle-decimal-fix-20260816d"
 
 
 class FakeMaterialReferenceBridge:
