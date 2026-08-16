@@ -7,6 +7,7 @@ from typing import Iterable
 from .annotations import make_ai_annotation
 from .schema import AnnotationSource, GeometryKind, SemanticAnnotation, SemanticRole, SiteGeometry
 from .service import SiteModelService
+from .site_context import SiteContext, SiteContextInterpreter
 
 
 @dataclass(frozen=True)
@@ -62,12 +63,13 @@ class SemanticClassificationPipeline:
         snapshot = service.snapshot()
         selected = None if geometry_ids is None else {str(item) for item in geometry_ids}
         rules = self.build_artist_feedback_rules(service)
+        context = self.build_site_context(service)
         annotations: list[SemanticAnnotation] = []
         classified: list[str] = []
         for geometry in snapshot.geometries:
             if selected is not None and geometry.geometry_id not in selected:
                 continue
-            result = self.classify_geometry(geometry, feedback_rules=rules)
+            result = self.classify_geometry(geometry, feedback_rules=rules, site_context=context)
             annotations.append(
                 make_ai_annotation(
                     geometry.geometry_id,
@@ -89,6 +91,7 @@ class SemanticClassificationPipeline:
         geometry: SiteGeometry,
         *,
         feedback_rules: Iterable[ArtistFeedbackRule] = (),
+        site_context: SiteContext | None = None,
     ) -> SemanticClassification:
         signature = self.geometry_signature(geometry)
         feedback = {rule.signature: rule for rule in feedback_rules}.get(signature)
@@ -112,6 +115,17 @@ class SemanticClassificationPipeline:
                     confidence,
                     "source_metadata_match",
                     tuple(f"token={item}" for item in hits),
+                )
+
+        if site_context is not None:
+            contextual = SiteContextInterpreter().infer(geometry, site_context)
+            if contextual is not None:
+                return SemanticClassification(
+                    geometry.geometry_id,
+                    contextual.role,
+                    contextual.confidence,
+                    contextual.reason,
+                    contextual.evidence,
                 )
 
         if geometry.kind in {GeometryKind.REGION, GeometryKind.HATCH} and geometry.closed:
@@ -138,6 +152,15 @@ class SemanticClassificationPipeline:
             (f"kind={geometry.kind.value}",),
         )
 
+    def build_site_context(self, service: SiteModelService) -> SiteContext:
+        snapshot = service.snapshot()
+        resolved_roles: dict[str, SemanticRole] = {}
+        for geometry in snapshot.geometries:
+            resolved = service.resolved_annotation(geometry.geometry_id)
+            if resolved is not None:
+                resolved_roles[geometry.geometry_id] = resolved.role
+        return SiteContextInterpreter().build(snapshot.geometries, resolved_roles=resolved_roles)
+
     def build_artist_feedback_rules(self, service: SiteModelService) -> tuple[ArtistFeedbackRule, ...]:
         votes: dict[str, Counter[SemanticRole]] = defaultdict(Counter)
         source_ids: dict[tuple[str, SemanticRole], list[str]] = defaultdict(list)
@@ -151,6 +174,12 @@ class SemanticClassificationPipeline:
                 continue
             latest = max(artist, key=lambda item: item.revision)
             signature = self.geometry_signature(geometry)
+            metadata = geometry.metadata
+            # Feedback is reusable only when it has a meaningful source signature.
+            # A generic closed region/line signature is too broad and can leak a
+            # building correction into unrelated driveway, lawn, or planting areas.
+            if not str(metadata.get("source_layer") or "").strip() and not str(metadata.get("semantic_hint") or "").strip():
+                continue
             votes[signature][latest.role] += 1
             source_ids[(signature, latest.role)].append(geometry.geometry_id)
 

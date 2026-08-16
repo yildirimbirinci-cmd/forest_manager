@@ -1,3 +1,9 @@
+from .site_context import (
+    ContextualSemanticInference,
+    GeometrySpatialFacts,
+    SiteContext,
+    SiteContextInterpreter,
+)
 from .semantic_classification import (
     ArtistFeedbackRule,
     SemanticAnalysisResult,
@@ -65,6 +71,10 @@ __all__ = [
     "SemanticClassificationPipeline",
     "ArtistFeedbackRule",
     "SemanticRole",
+    "ContextualSemanticInference",
+    "GeometrySpatialFacts",
+    "SiteContext",
+    "SiteContextInterpreter",
     "SiteGeometry",
     "SiteModelError",
     "SiteModelIngestor",
