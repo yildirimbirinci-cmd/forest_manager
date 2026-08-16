@@ -23,6 +23,7 @@ try:
         QLabel,
         QLineEdit,
         QListWidget,
+        QListWidgetItem,
         QMainWindow,
         QMessageBox,
         QPushButton,
@@ -118,10 +119,27 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         root.addLayout(top)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        self.global_planting_button = QPushButton("All Planting (Global)")
+        self.global_planting_button.setToolTip(
+            "Edit the primary Forest target. Plant Groups below are artist-facing groups; technical Forest layer names stay hidden."
+        )
+        self.global_planting_button.clicked.connect(self._select_global_planting)
+        left_layout.addWidget(self.global_planting_button)
+        self.plant_group_label = QLabel("Plant Groups (0)")
+        left_layout.addWidget(self.plant_group_label)
         self.forest_list = QListWidget()
         self.forest_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
-        self.forest_list.currentTextChanged.connect(self._forest_changed)
-        splitter.addWidget(self.forest_list)
+        self.forest_list.currentItemChanged.connect(self._plant_group_changed)
+        left_layout.addWidget(self.forest_list, 1)
+        group_note = QLabel(
+            "Group count is dynamic. Forest Manager maps each group to the minimum technical Forest targets required by Forest Pack."
+        )
+        group_note.setWordWrap(True)
+        left_layout.addWidget(group_note)
+        splitter.addWidget(left)
 
         right = QWidget()
         right_layout = QVBoxLayout(right)
@@ -214,20 +232,38 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         table.horizontalHeader().setStretchLastSection(True)
         return table
 
-    def _forest_changed(self, name: str) -> None:
-        if self._updating_forest_list or not name:
+    def _confirm_target_switch(self) -> bool:
+        if not self.controller.state.pending_edits:
+            return True
+        choice = QMessageBox.question(
+            self,
+            "Pending changes",
+            "Discard pending changes and switch planting target?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if choice != QMessageBox.StandardButton.Yes:
+            self._apply_state(self.controller.state)
+            return False
+        return True
+
+    def _plant_group_changed(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+        if self._updating_forest_list or current is None:
             return
-        if self.controller.state.pending_edits:
-            choice = QMessageBox.question(
-                self,
-                "Pending changes",
-                "Discard pending changes and switch Forest?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if choice != QMessageBox.StandardButton.Yes:
-                self._apply_state(self.controller.state)
-                return
+        group_id = current.data(Qt.ItemDataRole.UserRole)
+        if not group_id or not self._confirm_target_switch():
+            return
+        self._apply_state(self.controller.select_plant_group(str(group_id)))
+
+    def _select_global_planting(self) -> None:
+        if not self._confirm_target_switch():
+            return
+        self._apply_state(self.controller.select_global_planting())
+
+    def _forest_changed(self, name: str) -> None:
+        """Compatibility hook for older UI acceptance tests."""
+        if self._updating_forest_list or not name or not self._confirm_target_switch():
+            return
         self._apply_state(self.controller.select_forest(name))
 
     def refresh_scene(self) -> None:
@@ -272,24 +308,45 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         display = str(units.get("display_unit") or "")
         system = str(units.get("system_type") or "")
         self.units_label.setText(f"Display: {display} | System: {system}" if display or system else "")
-        self.selected_label.setText(state.selected_forest or "No Forest selected")
+        if state.selected_group_label:
+            self.selected_label.setText(f"Plant Group: {state.selected_group_label}")
+        elif state.selected_forest:
+            self.selected_label.setText("All Planting (Global)")
+        else:
+            self.selected_label.setText("No planting target selected")
 
-        current_names = tuple(self.forest_list.item(i).text() for i in range(self.forest_list.count()))
-        if current_names != state.forest_names:
+        current_group_ids = tuple(
+            str(self.forest_list.item(i).data(Qt.ItemDataRole.UserRole) or "")
+            for i in range(self.forest_list.count())
+        )
+        next_group_ids = tuple(group.group_id for group in state.plant_groups)
+        if current_group_ids != next_group_ids:
             self._updating_forest_list = True
             try:
                 self.forest_list.clear()
-                self.forest_list.addItems(list(state.forest_names))
+                for group in state.plant_groups:
+                    item = QListWidgetItem(group.label)
+                    item.setData(Qt.ItemDataRole.UserRole, group.group_id)
+                    item.setToolTip("Artist planting group")
+                    self.forest_list.addItem(item)
             finally:
                 self._updating_forest_list = False
-        if state.selected_forest:
-            matches = self.forest_list.findItems(state.selected_forest, Qt.MatchFlag.MatchExactly)
-            if matches and self.forest_list.currentItem() is not matches[0]:
-                self._updating_forest_list = True
-                try:
-                    self.forest_list.setCurrentItem(matches[0])
-                finally:
-                    self._updating_forest_list = False
+        self.plant_group_label.setText(f"Plant Groups ({len(state.plant_groups)})")
+        self.global_planting_button.setEnabled(bool(state.primary_forest) and state.bridge_online)
+
+        self._updating_forest_list = True
+        try:
+            if state.selected_group_id:
+                for index in range(self.forest_list.count()):
+                    item = self.forest_list.item(index)
+                    if item.data(Qt.ItemDataRole.UserRole) == state.selected_group_id:
+                        self.forest_list.setCurrentItem(item)
+                        break
+            else:
+                self.forest_list.clearSelection()
+                self.forest_list.setCurrentItem(None)
+        finally:
+            self._updating_forest_list = False
 
         self._updating_artist_controls = True
         try:

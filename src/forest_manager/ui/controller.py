@@ -16,6 +16,12 @@ from .semantic_controls import (
     calibration_probe_keys,
     default_artist_values,
 )
+from .plant_groups import (
+    PlantGroupTarget,
+    discover_plant_groups,
+    discover_primary_forest,
+    find_group_for_forest,
+)
 from .semantic_calibration import (
     CLUSTER_CHARACTER_CANDIDATES,
     NATURALNESS_CANDIDATES,
@@ -63,6 +69,10 @@ class PendingEdit:
 @dataclass(frozen=True)
 class ForestUIState:
     forest_names: tuple[str, ...] = ()
+    primary_forest: str | None = None
+    plant_groups: tuple[PlantGroupTarget, ...] = ()
+    selected_group_id: str | None = None
+    selected_group_label: str | None = None
     selected_forest: str | None = None
     properties: tuple[PropertyRow, ...] = ()
     scene_units: dict[str, Any] | None = None
@@ -171,15 +181,25 @@ class ForestManagerUIController:
         if forest_name not in forests:
             raise ForestControlError(f"Forest target became stale while loading UI state: {forest_name}")
         self._pending.clear()
+        groups = discover_plant_groups(forests)
+        group = find_group_for_forest(groups, forest_name)
         self._state = ForestUIState(
             forest_names=tuple(forests),
+            primary_forest=discover_primary_forest(forests),
+            plant_groups=groups,
+            selected_group_id=group.group_id if group is not None else None,
+            selected_group_label=group.label if group is not None else None,
             selected_forest=forest_name,
             properties=properties,
             scene_units=self._unit_payload(units),
             pending_edits=(),
             artist_controls=self._artist_control_states(properties, self._unit_payload(units)),
             bridge_online=True,
-            status=f"Loaded {forest_name}: {len(properties)} properties",
+            status=(
+                f"Loaded plant group {group.label}: {len(properties)} properties"
+                if group is not None
+                else f"Loaded global planting target: {len(properties)} properties"
+            ),
             error=None,
         )
         return self._state
@@ -192,6 +212,10 @@ class ForestManagerUIController:
                 self._pending.clear()
                 self._state = ForestUIState(
                     forest_names=(),
+                    primary_forest=None,
+                    plant_groups=(),
+                    selected_group_id=None,
+                    selected_group_label=None,
                     selected_forest=None,
                     properties=(),
                     scene_units=self._unit_payload(units),
@@ -220,6 +244,32 @@ class ForestManagerUIController:
                 error=f"{type(exc).__name__}: {exc}",
             )
             return self._state
+
+    def select_plant_group(self, group_id: str) -> ForestUIState:
+        try:
+            candidate = str(group_id or "").strip()
+            group = next((item for item in self._state.plant_groups if item.group_id == candidate), None)
+            if group is None:
+                raise ForestControlError(f"Plant group is stale or missing: {candidate}")
+            return self.select_forest(group.forest_name)
+        except Exception as exc:
+            self._state = replace(
+                self._state,
+                status="Plant group selection failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return self._state
+
+    def select_global_planting(self) -> ForestUIState:
+        target = self._state.primary_forest
+        if not target:
+            self._state = replace(
+                self._state,
+                status="Global planting target unavailable",
+                error="ForestControlError: No primary Forest is available.",
+            )
+            return self._state
+        return self.select_forest(target)
 
     def select_forest(self, forest_name: str) -> ForestUIState:
         try:
