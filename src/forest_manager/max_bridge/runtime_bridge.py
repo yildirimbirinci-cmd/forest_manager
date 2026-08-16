@@ -10,7 +10,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 49491
 EXPECTED_BRIDGE_VERSION = "0.9.53"
-EXPECTED_BRIDGE_BUILD_ID = "stage6-7-texture-animhandle-decimal-fix-20260816d"
+EXPECTED_BRIDGE_BUILD_ID = "stage6-8-cproxy-reference-write-20260816a"
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
 

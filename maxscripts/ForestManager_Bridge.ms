@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-7-texture-animhandle-decimal-fix-20260816d\"}"
+        ",\"bridge_build_id\":\"stage6-8-cproxy-reference-write-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6352,6 +6352,10 @@ struct ForestManagerBridgeState
         (
             valueJson = if value == undefined then "null" else jsonString value.name
         )
+        else if (toLower propertyName) == "cobjlist" and (value == undefined or (isValidNode value and safeClassName value == "CProxy")) then
+        (
+            valueJson = if value == undefined then "null" else jsonString value.name
+        )
         else
         (
             throw ("Forest control array element is not writable by a verified endpoint: " + propertyName + "[" + (zeroIndex as string) + "] class=" + valueClass)
@@ -6359,6 +6363,7 @@ struct ForestManagerBridgeState
         local referenceType = ""
         if (toLower propertyName) == "arnodelist" and (value == undefined or isValidNode value) then referenceType = "node"
         if (toLower propertyName) == "matlist" and (value == undefined or forestControlIsMaterialReference value) then referenceType = "material"
+        if (toLower propertyName) == "cobjlist" and (value == undefined or (isValidNode value and safeClassName value == "CProxy")) then referenceType = "cproxy"
         "{\"forest_name\":" + (jsonString forestNode.name) +
         ",\"property_name\":" + (jsonString propertyName) +
         ",\"index\":" + (zeroIndex as string) +
@@ -6522,6 +6527,75 @@ struct ForestManagerBridgeState
         ",\"reference_type\":\"material\"" +
         ",\"before_value\":" + beforeJson +
         ",\"after_value\":" + (forestControlMaterialReferenceValueJson afterValue) +
+        ",\"verified\":true}"
+    ),
+
+    fn forestControlCProxyReferenceValueJson value =
+    (
+        if value == undefined then return "null"
+        if isValidNode value and safeClassName value == "CProxy" then return (jsonString value.name)
+        throw "Forest control CProxy reference value is neither undefined nor a CProxy scene node."
+    ),
+
+    fn forestControlSetArrayCProxyReferenceJson forestName propertyName zeroIndex referenceMode encodedNodeName =
+    (
+        if (toLower propertyName) != "cobjlist" do
+            throw ("CProxy reference array writes are not enabled for: " + propertyName)
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local arr = undefined
+        local readOk = true
+        try (arr = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control array property is unreadable: " + propertyName)
+        local arrayClass = safeClassName arr
+        if arrayClass != "ArrayParameter" and arrayClass != "Array" do
+            throw ("Forest control property is not an array: " + propertyName + " class=" + arrayClass)
+        if zeroIndex < 0 do throw "Forest control array index must be zero or greater."
+        local countValue = arr.count
+        if zeroIndex >= countValue do
+            throw ("Forest control array index out of range: " + propertyName + " index=" + (zeroIndex as string) + " count=" + (countValue as string))
+        local maxIndex = zeroIndex + 1
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = arr[maxIndex]) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
+        if beforeValue != undefined and not (isValidNode beforeValue and safeClassName beforeValue == "CProxy") do
+            throw ("Forest control array element is not a CProxy reference: " + propertyName + "[" + (zeroIndex as string) + "] class=" + (safeClassName beforeValue))
+        local beforeJson = forestControlCProxyReferenceValueJson beforeValue
+        local newValue = undefined
+        if referenceMode == "cproxy" then
+        (
+            local nodeName = decodeBase64Utf8 encodedNodeName
+            if nodeName == "" do throw "CProxy reference target name cannot be empty."
+            newValue = getNodeByName nodeName
+            if newValue == undefined or not (isValidNode newValue) do
+                throw ("CProxy reference target was not found: " + nodeName)
+            if safeClassName newValue != "CProxy" do
+                throw ("CProxy reference target is not CProxy: " + nodeName + " class=" + (safeClassName newValue))
+        )
+        else if referenceMode != "null" then
+        (
+            throw ("Unsupported CProxy reference mode: " + referenceMode)
+        )
+        arr[maxIndex] = newValue
+        refreshForestPreviewNode forestNode
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = arr[maxIndex]) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control array CProxy reference readback failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local verified = false
+        if newValue == undefined then
+            verified = (afterValue == undefined) and (arr.count == countValue)
+        else
+            verified = (isValidNode afterValue) and (afterValue == newValue) and (safeClassName afterValue == "CProxy") and (arr.count == countValue)
+        if not verified do throw ("Forest control array CProxy reference write verification failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"index\":" + (zeroIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"reference_type\":\"cproxy\"" +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + (forestControlCProxyReferenceValueJson afterValue) +
         ",\"verified\":true}"
     ),
 
@@ -6814,6 +6888,25 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "FOREST_CONTROL_GET_TEXTURE_REF" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_CPROXY_REF|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FOREST_CONTROL_SET_ARRAY_CPROXY_REF requires forest, property, zero-based index, mode and CProxy node token."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local zeroIndex = parts[4] as integer
+                local referenceMode = toLower parts[5]
+                local encodedNodeName = parts[6]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_ARRAY_CPROXY_REF\",\"data\":" + forestControlSetArrayCProxyReferenceJson forestName propertyName zeroIndex referenceMode encodedNodeName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_ARRAY_CPROXY_REF" (getCurrentException())
             )
         )
 
