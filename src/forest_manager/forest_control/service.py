@@ -104,6 +104,48 @@ class ForestPackControlService(ForestControlService):
                 }
         raise ForestControlError(f"Forest not found in discovery payload: {forest_name}")
 
+    def inventory(self, forest_name: str, *, preflight: bool = True) -> dict[str, Any]:
+        snapshots = self.discover(preflight=preflight)
+        for snapshot in snapshots:
+            if snapshot.forest_name == forest_name:
+                return {
+                    "forest_name": snapshot.forest_name,
+                    "property_count": snapshot.property_count,
+                    "properties": [
+                        {
+                            "name": prop.name,
+                            "value_class": prop.value_class,
+                            "write_mode": prop.write_mode,
+                            "readable": prop.readable,
+                            "value": prop.value,
+                            "array_metadata": prop.array_metadata,
+                        }
+                        for prop in snapshot.properties
+                    ],
+                }
+        raise ForestControlError(f"Forest not found in discovery payload: {forest_name}")
+
+    def curve_metadata(self, forest_name: str, property_name: str, *, preflight: bool = True) -> dict[str, Any]:
+        inventory = self.inventory(forest_name, preflight=preflight)
+        for prop in inventory.get("properties") or []:
+            if str(prop.get("name") or "") != property_name:
+                continue
+            if str(prop.get("value_class") or "") != "CurveControl":
+                raise ForestControlError(
+                    f"Forest property is not CurveControl: {forest_name}.{property_name}"
+                )
+            return {
+                "name": property_name,
+                "value_class": "CurveControl",
+                "write_mode": "read_only",
+                "readable": bool(prop.get("readable")),
+                "value": prop.get("value"),
+                "array_metadata": prop.get("array_metadata"),
+            }
+        raise ForestControlError(
+            f"Forest property not found in discovery payload: {forest_name}.{property_name}"
+        )
+
 
 def aggregate_capability_matrix(snapshots: tuple[ForestSnapshot, ...]) -> dict[str, Any]:
     aggregate = {"read_only": 0, "scalar": 0, "color": 0}
