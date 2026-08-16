@@ -374,3 +374,122 @@ class SemanticTransactionManager:
             except Exception:
                 pass
             raise
+
+
+@dataclass(frozen=True)
+class ProductionWorkflowResult:
+    resolved_default_forest: str
+    selected_target_used: bool
+    explicit_target_used: bool
+    forest_names_before: tuple[str, ...]
+    forest_names_after: tuple[str, ...]
+    scene_units: dict[str, Any]
+    transaction: UnifiedTransactionResult
+    stale_target_guard_verified: bool
+
+
+class ProductionControlWorkflow:
+    """Stage 6.10 application-facing Forest control boundary.
+
+    Resolves selected/explicit targets, captures active scene units, validates all
+    Forest targets before writes, and rejects scene topology changes around a
+    transaction so UI callers cannot commit against stale Forest identities.
+    """
+
+    def __init__(
+        self,
+        service: ForestPackControlService | None = None,
+        transaction_manager: UnifiedControlTransactionManager | None = None,
+    ) -> None:
+        self.service = service or ForestPackControlService()
+        self.transaction_manager = transaction_manager or UnifiedControlTransactionManager(self.service)
+
+    def _resolve_default(
+        self,
+        explicit_forest_name: str | None,
+        *,
+        use_selected: bool,
+    ) -> tuple[str, bool, bool]:
+        if explicit_forest_name is not None:
+            resolved = self.service.resolve_forest_target(explicit_forest_name, use_selected=False, preflight=True)
+            return resolved, False, True
+        resolved = self.service.resolve_forest_target(None, use_selected=use_selected, preflight=True)
+        return resolved, True, False
+
+    @staticmethod
+    def _unit_payload(units: Any) -> dict[str, Any]:
+        return {
+            "display_type": units.display_type,
+            "display_unit": units.display_unit,
+            "system_type": units.system_type,
+            "system_scale": units.system_scale,
+            "one_meter_system_units": units.one_meter_system_units,
+            "one_centimeter_system_units": units.one_centimeter_system_units,
+            "one_millimeter_system_units": units.one_millimeter_system_units,
+            "sample_one_meter_display": units.sample_one_meter_display,
+            "custom_name": units.custom_name,
+            "custom_value": units.custom_value,
+            "custom_unit": units.custom_unit,
+        }
+
+    def execute(
+        self,
+        operations: Iterable[UnifiedControlOperation],
+        *,
+        explicit_forest_name: str | None = None,
+        use_selected: bool = True,
+        rollback_on_success: bool = False,
+    ) -> ProductionWorkflowResult:
+        resolved_default, selected_used, explicit_used = self._resolve_default(
+            explicit_forest_name, use_selected=use_selected
+        )
+        scene_units = self.service.scene_units(preflight=False)
+        forests_before = tuple(self.service.list_forests(preflight=False))
+        if resolved_default not in forests_before:
+            raise ForestControlError(f"Resolved Forest target became stale before transaction: {resolved_default}")
+
+        raw_operations = tuple(operations)
+        if not raw_operations:
+            raise ForestControlError("Production workflow requires at least one operation.")
+        for operation in raw_operations:
+            target = operation.forest_name or resolved_default
+            if target not in forests_before:
+                raise ForestControlError(f"Production workflow target is stale or missing: {target}")
+
+        marker = self.service.rollback_marker()
+        transaction = self.transaction_manager.execute(
+            raw_operations,
+            default_forest_name=resolved_default,
+            rollback_on_success=rollback_on_success,
+        )
+        forests_after = tuple(self.service.list_forests(preflight=False))
+        if forests_after != forests_before:
+            if self.service.rollback_marker() > marker:
+                self.service.rollback_to(marker)
+            raise ForestControlError(
+                "Forest scene topology changed during production transaction; targets may be stale."
+            )
+        return ProductionWorkflowResult(
+            resolved_default_forest=resolved_default,
+            selected_target_used=selected_used,
+            explicit_target_used=explicit_used,
+            forest_names_before=forests_before,
+            forest_names_after=forests_after,
+            scene_units=self._unit_payload(scene_units),
+            transaction=transaction,
+            stale_target_guard_verified=True,
+        )
+
+    def apply_and_rollback(
+        self,
+        operations: Iterable[UnifiedControlOperation],
+        *,
+        explicit_forest_name: str | None = None,
+        use_selected: bool = True,
+    ) -> ProductionWorkflowResult:
+        return self.execute(
+            operations,
+            explicit_forest_name=explicit_forest_name,
+            use_selected=use_selected,
+            rollback_on_success=True,
+        )

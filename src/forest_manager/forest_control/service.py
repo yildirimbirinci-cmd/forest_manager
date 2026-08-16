@@ -32,6 +32,33 @@ class ForestSnapshot:
     arrays: tuple[dict[str, Any], ...]
 
 
+@dataclass(frozen=True)
+class SceneUnitContext:
+    display_type: str
+    display_unit: str
+    system_type: str
+    system_scale: float
+    one_meter_system_units: float
+    one_centimeter_system_units: float
+    one_millimeter_system_units: float
+    sample_one_meter_display: str
+    custom_name: str = ""
+    custom_value: float = 0.0
+    custom_unit: str = ""
+
+    def meters_to_system_units(self, meters: float) -> float:
+        if isinstance(meters, bool) or not isinstance(meters, (int, float)) or not math.isfinite(float(meters)):
+            raise ForestControlError("Meters value must be a finite number.")
+        return float(meters) * self.one_meter_system_units
+
+    def system_units_to_meters(self, value: float) -> float:
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+            raise ForestControlError("System-unit value must be a finite number.")
+        if self.one_meter_system_units <= 0.0:
+            raise ForestControlError("Scene meter conversion is invalid.")
+        return float(value) / self.one_meter_system_units
+
+
 def _require_ok(response: dict[str, Any], command: str) -> dict[str, Any]:
     if not response.get("ok"):
         raise ForestControlError(f"{command} failed: {response.get('error') or response}")
@@ -899,6 +926,65 @@ class ForestPackControlService(ForestControlService):
                     ],
                 }
         raise ForestControlError(f"Forest not found in discovery payload: {forest_name}")
+
+    def scene_units(self, *, preflight: bool = True) -> SceneUnitContext:
+        if preflight:
+            ensure_current_bridge()
+        data = _require_ok(send_command("GET_SCENE_UNITS"), "GET_SCENE_UNITS")
+        if data.get("verified") is not True:
+            raise ForestControlError("Scene unit context was not verified.")
+        one_meter = float(data.get("one_meter_system_units") or 0.0)
+        if not math.isfinite(one_meter) or one_meter <= 0.0:
+            raise ForestControlError("Scene meter conversion is invalid.")
+        return SceneUnitContext(
+            display_type=str(data.get("display_type") or ""),
+            display_unit=str(data.get("display_unit") or ""),
+            system_type=str(data.get("system_type") or ""),
+            system_scale=float(data.get("system_scale") or 0.0),
+            one_meter_system_units=one_meter,
+            one_centimeter_system_units=float(data.get("one_centimeter_system_units") or 0.0),
+            one_millimeter_system_units=float(data.get("one_millimeter_system_units") or 0.0),
+            sample_one_meter_display=str(data.get("sample_one_meter_display") or ""),
+            custom_name=str(data.get("custom_name") or ""),
+            custom_value=float(data.get("custom_value") or 0.0),
+            custom_unit=str(data.get("custom_unit") or ""),
+        )
+
+    def selected_forest_name(self, *, preflight: bool = True) -> str:
+        if preflight:
+            ensure_current_bridge()
+        data = _require_ok(send_command("GET_SELECTION"), "GET_SELECTION")
+        selected_name = str(data.get("name") or "").strip()
+        if not selected_name:
+            raise ForestControlError("3ds Max selection has no object name.")
+        forests = self.list_forests(preflight=False)
+        if selected_name not in forests:
+            selected_class = str(data.get("class") or "")
+            raise ForestControlError(
+                f"Selected 3ds Max object is not a discovered Forest: {selected_name} class={selected_class}"
+            )
+        return selected_name
+
+    def resolve_forest_target(
+        self,
+        explicit_forest_name: str | None = None,
+        *,
+        use_selected: bool = True,
+        preflight: bool = True,
+    ) -> str:
+        if preflight:
+            ensure_current_bridge()
+        forests = self.list_forests(preflight=False)
+        if explicit_forest_name is not None:
+            candidate = explicit_forest_name.strip() if isinstance(explicit_forest_name, str) else ""
+            if not candidate:
+                raise ForestControlError("Explicit Forest target must be a non-empty string.")
+            if candidate not in forests:
+                raise ForestControlError(f"Explicit Forest target is stale or missing: {candidate}")
+            return candidate
+        if not use_selected:
+            raise ForestControlError("Forest target requires an explicit name when selected-target resolution is disabled.")
+        return self.selected_forest_name(preflight=False)
 
     def curve_metadata(self, forest_name: str, property_name: str, *, preflight: bool = True) -> dict[str, Any]:
         inventory = self.inventory(forest_name, preflight=preflight)
