@@ -216,3 +216,22 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Forest Manager local development artifacts
+artifacts/
+models/
+resources/generated_masks/
+
+# Local diagnostic / runtime outputs
+*.runtime.txt
+*_runtime.txt
+*_probe.txt
+*_dis.txt
+*_diff.txt
+*_hits.txt
+
+# Local package inputs / recovery archives
+*_input.zip
+*_recovery.zip
+*_debug.zip
+*_rebuild*.zip
