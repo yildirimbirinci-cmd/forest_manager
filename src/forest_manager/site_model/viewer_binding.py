@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from .schema import GeometryKind, SemanticRole, SitePoint
+from .schema import AnnotationSource, GeometryKind, SemanticRole, SitePoint
 from .service import SiteModelService
 from .viewer import SiteModelViewerAdapter, ViewerGeometryRecord
 from .viewer_interaction import SiteModelViewerInteraction
@@ -24,6 +24,11 @@ class ViewerRenderRecord:
     points: tuple[SitePoint, ...]
     closed: bool
     role: SemanticRole | None
+    annotation_source: AnnotationSource | None
+    confidence: float | None
+    artist_confirmed: bool
+    label: str
+    notes: str
     source_id: str
     layer: str
     page_index: int | None
@@ -74,6 +79,11 @@ class SiteModelViewerBinding:
                     points=record.points,
                     closed=record.closed,
                     role=record.role,
+                    annotation_source=record.annotation_source,
+                    confidence=record.confidence,
+                    artist_confirmed=record.artist_confirmed,
+                    label=record.label,
+                    notes=record.notes,
                     source_id=record.source_id,
                     layer=record.layer,
                     page_index=record.page_index,

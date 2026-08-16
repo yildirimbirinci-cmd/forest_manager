@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+
+from forest_manager.site_model import SiteModelService, SiteViewerPresenter
 
 from .controller import ForestManagerUIController, ForestUIState, PropertyRow
 from .semantic_controls import artist_control_specs
+from .project_viewer import ProjectViewerWidget
 
 try:
     from PySide6.QtCore import Qt
@@ -71,11 +75,21 @@ class CompactDoubleSpinBox(QDoubleSpinBox if QApplication is not None else objec
 
 
 class ForestManagerMainWindow(QMainWindow if QApplication is not None else object):
-    def __init__(self, controller: ForestManagerUIController | None = None) -> None:
+    def __init__(
+        self,
+        controller: ForestManagerUIController | None = None,
+        *,
+        site_model_service: SiteModelService | None = None,
+        site_model_persistence_path: str | Path | None = None,
+    ) -> None:
         if QApplication is None:
             raise RuntimeError("PySide6 is required to launch the Forest Manager UI.")
         super().__init__()
         self.controller = controller or ForestManagerUIController()
+        self.site_model_service = site_model_service or SiteModelService()
+        self.site_viewer_presenter = SiteViewerPresenter(
+            self.site_model_service, persistence_path=site_model_persistence_path
+        )
         self._updating_forest_list = False
         self._updating_editors = False
         self._tables: dict[str, QTableWidget] = {}
@@ -116,6 +130,8 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
 
         self.mode_tabs = QTabWidget()
         self.mode_tabs.addTab(self._create_artist_controls_page(), "Artist Controls")
+        self.project_viewer = ProjectViewerWidget(self.site_viewer_presenter)
+        self.mode_tabs.addTab(self.project_viewer, "Project Viewer")
 
         advanced = QWidget()
         advanced_layout = QVBoxLayout(advanced)
@@ -149,6 +165,9 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         root.addWidget(splitter, 1)
         self.setCentralWidget(central)
 
+
+    def refresh_project_viewer(self) -> None:
+        self.project_viewer.refresh()
 
     def _create_artist_controls_page(self) -> QWidget:
         page = QWidget()

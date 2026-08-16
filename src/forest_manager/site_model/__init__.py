@@ -78,3 +78,7 @@ __all__ = [
     "reader_backend_status",
     "resolve_annotation",
 ]
+
+from .viewer_presenter import ProjectViewerState, SiteViewerPresenter
+
+__all__.extend(["ProjectViewerState", "SiteViewerPresenter"])
