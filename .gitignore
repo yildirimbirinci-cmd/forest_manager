@@ -63,3 +63,10 @@ resources/generated_masks/
 # Local source review / regression transfer packages
 *_source_review.zip
 *_regression_failures.zip
+
+# Local review / transfer archives
+*_remaining_bridge_regressions.zip
+*_runtime_review.zip
+*_ui_sources.zip
+*_plant_groups_sources.zip
+*_managed_scene_bridge_sources.zip
