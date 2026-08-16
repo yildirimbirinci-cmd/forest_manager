@@ -51,7 +51,7 @@ struct ForestManagerBridgeState
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
         ",\"bridge_version\":\"0.9.53\"" +
-        ",\"bridge_build_id\":\"stage6-4-point3-array-write-20260816a\"}"
+        ",\"bridge_build_id\":\"stage6-5-node-reference-write-20260816a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -6170,10 +6170,15 @@ struct ForestManagerBridgeState
             vectorType = "point3"
             valueJson = "[" + (value.x as string) + "," + (value.y as string) + "," + (value.z as string) + "]"
         )
+        else if (toLower propertyName) == "arnodelist" and (value == undefined or isValidNode value) then
+        (
+            valueJson = if value == undefined then "null" else jsonString value.name
+        )
         else
         (
             throw ("Forest control array element is not writable by a verified endpoint: " + propertyName + "[" + (zeroIndex as string) + "] class=" + valueClass)
         )
+        local referenceType = if (toLower propertyName) == "arnodelist" and (value == undefined or isValidNode value) then "node" else ""
         "{\"forest_name\":" + (jsonString forestNode.name) +
         ",\"property_name\":" + (jsonString propertyName) +
         ",\"index\":" + (zeroIndex as string) +
@@ -6181,7 +6186,76 @@ struct ForestManagerBridgeState
         ",\"value_class\":" + (jsonString valueClass) +
         ",\"scalar_type\":" + (jsonString scalarType) +
         ",\"vector_type\":" + (jsonString vectorType) +
+        ",\"reference_type\":" + (jsonString referenceType) +
         ",\"value\":" + valueJson +
+        ",\"verified\":true}"
+    ),
+
+
+    fn forestControlNodeReferenceValueJson value =
+    (
+        if value == undefined then return "null"
+        if isValidNode value then return (jsonString value.name)
+        throw "Forest control node reference value is neither undefined nor a valid scene node."
+    ),
+
+    fn forestControlSetArrayNodeReferenceJson forestName propertyName zeroIndex referenceMode encodedNodeName =
+    (
+        if (toLower propertyName) != "arnodelist" do
+            throw ("Node reference array writes are not enabled for: " + propertyName)
+        local forestNode = findForestControlNode forestName
+        local propName = forestControlPropertyName forestNode propertyName
+        local arr = undefined
+        local readOk = true
+        try (arr = getProperty forestNode propName) catch (readOk = false)
+        if not readOk do throw ("Forest control array property is unreadable: " + propertyName)
+        local arrayClass = safeClassName arr
+        if arrayClass != "ArrayParameter" and arrayClass != "Array" do
+            throw ("Forest control property is not an array: " + propertyName + " class=" + arrayClass)
+        if zeroIndex < 0 do throw "Forest control array index must be zero or greater."
+        local countValue = arr.count
+        if zeroIndex >= countValue do
+            throw ("Forest control array index out of range: " + propertyName + " index=" + (zeroIndex as string) + " count=" + (countValue as string))
+        local maxIndex = zeroIndex + 1
+        local beforeValue = undefined
+        local beforeReadOk = true
+        try (beforeValue = arr[maxIndex]) catch (beforeReadOk = false)
+        if not beforeReadOk do throw ("Forest control array element is unreadable: " + propertyName + "[" + (zeroIndex as string) + "]")
+        if beforeValue != undefined and not (isValidNode beforeValue) do
+            throw ("Forest control array element is not a node reference: " + propertyName + "[" + (zeroIndex as string) + "] class=" + (safeClassName beforeValue))
+        local beforeJson = forestControlNodeReferenceValueJson beforeValue
+        local newValue = undefined
+        if referenceMode == "node" then
+        (
+            local nodeName = decodeBase64Utf8 encodedNodeName
+            if nodeName == "" do throw "Node reference target name cannot be empty."
+            newValue = getNodeByName nodeName
+            if newValue == undefined or not (isValidNode newValue) do
+                throw ("Node reference target was not found: " + nodeName)
+        )
+        else if referenceMode != "null" then
+        (
+            throw ("Unsupported node reference mode: " + referenceMode)
+        )
+        arr[maxIndex] = newValue
+        refreshForestPreviewNode forestNode
+        local afterValue = undefined
+        local afterReadOk = true
+        try (afterValue = arr[maxIndex]) catch (afterReadOk = false)
+        if not afterReadOk do throw ("Forest control array node reference readback failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        local verified = false
+        if newValue == undefined then
+            verified = (afterValue == undefined) and (arr.count == countValue)
+        else
+            verified = (isValidNode afterValue) and (afterValue == newValue) and (arr.count == countValue)
+        if not verified do throw ("Forest control array node reference write verification failed: " + propertyName + "[" + (zeroIndex as string) + "]")
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"property_name\":" + (jsonString propertyName) +
+        ",\"index\":" + (zeroIndex as string) +
+        ",\"count\":" + (countValue as string) +
+        ",\"reference_type\":\"node\"" +
+        ",\"before_value\":" + beforeJson +
+        ",\"after_value\":" + (forestControlNodeReferenceValueJson afterValue) +
         ",\"verified\":true}"
     ),
 
@@ -6439,6 +6513,26 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "FOREST_CONTROL_GET_ARRAY_ELEMENT" (getCurrentException())
+            )
+        )
+
+
+        if matchPattern command pattern:"FOREST_CONTROL_SET_ARRAY_NODE_REF|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FOREST_CONTROL_SET_ARRAY_NODE_REF requires forest, property, zero-based index, mode and node token."
+                local forestName = decodeBase64Utf8 parts[2]
+                local propertyName = decodeBase64Utf8 parts[3]
+                local zeroIndex = parts[4] as integer
+                local referenceMode = toLower parts[5]
+                local encodedNodeName = parts[6]
+                return "{\"ok\":true,\"command\":\"FOREST_CONTROL_SET_ARRAY_NODE_REF\",\"data\":" + forestControlSetArrayNodeReferenceJson forestName propertyName zeroIndex referenceMode encodedNodeName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FOREST_CONTROL_SET_ARRAY_NODE_REF" (getCurrentException())
             )
         )
 

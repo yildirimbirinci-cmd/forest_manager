@@ -132,8 +132,8 @@ def test_stage62_bridge_contract_and_stable_startup_loader():
     runtime_text = (root / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py").read_text(encoding="utf-8")
     assert "FOREST_CONTROL_SET_COLOR" in bridge_text
     assert "fn forestControlSetColorJson" in bridge_text
-    assert "stage6-4-point3-array-write-20260816a" in bridge_text
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage6-4-point3-array-write-20260816a"' in runtime_text
+    assert "stage6-5-node-reference-write-20260816a" in bridge_text
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage6-5-node-reference-write-20260816a"' in runtime_text
     loader_section = runtime_text.split("def _startup_loader_text", 1)[1].split("def install_startup_bridge_loader", 1)[0]
     assert "EXPECTED_BRIDGE_BUILD_ID" not in loader_section
     assert "ForestManager_Bridge.ms" not in loader_section
