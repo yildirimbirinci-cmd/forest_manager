@@ -5,6 +5,17 @@ from typing import Any
 
 from forest_manager.forest_control.schema import semantic_domains
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
+from forest_manager.forest_control.plant_group_execution import (
+    execute_plant_group_manifest,
+    refresh_plant_group_distribution_fast,
+    refresh_plant_group_diversity_map,
+)
+from forest_manager.max_bridge.runtime_bridge import (
+    apply_plant_group_species_runtime,
+    get_single_forest_area_bounds,
+    read_plant_group_manifest,
+    write_plant_group_manifest,
+)
 from forest_manager.forest_control.semantic_transaction import (
     UnifiedControlOperation,
     UnifiedControlTransactionManager,
@@ -78,6 +89,7 @@ class ForestUIState:
     scene_units: dict[str, Any] | None = None
     pending_edits: tuple[PendingEdit, ...] = ()
     artist_controls: tuple[ArtistControlState, ...] = ()
+    selected_group_runtime: dict[str, Any] | None = None
     bridge_online: bool = False
     status: str = "Not connected"
     error: str | None = None
@@ -97,6 +109,9 @@ class ForestManagerUIController:
         self._pending: dict[str, PendingEdit] = {}
         self._semantic_map = self._build_semantic_map()
         self._artist_values = default_artist_values()
+        # Selection-time cache. Forest/Plant Group switching must never trigger
+        # a full Forest Pack inventory/readback on the Qt UI thread.
+        self._group_runtime_cache: dict[str, dict[str, Any]] = {}
 
     @property
     def state(self) -> ForestUIState:
@@ -173,7 +188,205 @@ class ForestManagerUIController:
     def _sync_state_pending(self) -> None:
         self._state = replace(self._state, pending_edits=tuple(self._pending.values()))
 
-    def _load_forest(self, forest_name: str, *, preflight: bool) -> ForestUIState:
+    def _canonical_group_reset_defaults(self, target: dict[str, Any]) -> dict[str, Any]:
+        """Return Reset defaults calibrated to the current active Area size.
+
+        Older Stage 7 builds could persist a *new* area_reference_system while
+        leaving the child spacing at the legacy 75/75/25 m values.  Merely
+        comparing the stored area reference therefore is not enough.  A reset
+        baseline is valid only when both the area reference and the spacing
+        itself agree with the current-area calibration.
+        """
+        existing = target.get("reset_defaults")
+        group_id = str(target.get("group_id") or "").lower()
+
+        current_extent = 0.0
+        try:
+            forest_name = self._state.selected_forest or "FM_Forest_001"
+            bounds = get_single_forest_area_bounds(forest_name)
+            current_extent = min(
+                float(bounds.get("width_system") or 0.0),
+                float(bounds.get("height_system") or 0.0),
+            )
+        except Exception:
+            current_extent = 0.0
+
+        authored_spacing_m = 25.0 if "structural_shrub" in group_id else 75.0
+        one_meter, _suffix = self._display_distance_contract(self._state.scene_units)
+        if current_extent > 0.0 and one_meter > 0.0:
+            authored_extent_system = 75.0 * one_meter
+            scale = current_extent / authored_extent_system
+            expected_spacing = max(1e-6, authored_spacing_m * one_meter * scale)
+        else:
+            expected_spacing = self._display_distance_to_system(authored_spacing_m, self._state.scene_units)
+
+        if isinstance(existing, dict):
+            spacing = existing.get("spacing_system")
+            artist = existing.get("artist_values")
+            stored_extent = float(existing.get("area_reference_system") or 0.0)
+            extent_matches = (
+                current_extent <= 0.0
+                or (stored_extent > 0.0 and abs(stored_extent - current_extent) <= max(1.0, current_extent * 0.02))
+            )
+            stored_spacing = (
+                float(spacing[0])
+                if isinstance(spacing, (list, tuple)) and len(spacing) == 2
+                else 0.0
+            )
+            spacing_matches = (
+                expected_spacing <= 0.0
+                or abs(stored_spacing - expected_spacing) <= max(1.0, expected_spacing * 0.02)
+            )
+            if isinstance(artist, dict) and extent_matches and spacing_matches:
+                if "species_scale_percent" not in artist:
+                    artist["species_scale_percent"] = 100.0
+                return existing
+
+        defaults = {
+            "spacing_system": [float(expected_spacing), float(expected_spacing)],
+            "area_reference_system": float(current_extent),
+            "artist_values": {
+                "species_enabled": True,
+                "species_scale_percent": 100.0,
+                "naturalness": "Balanced",
+                "cluster_character": "Medium Clusters",
+            },
+        }
+        target["reset_defaults"] = defaults
+        return defaults
+
+    def _synchronize_group_manifest_from_scene(self, manifest: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Merge live Forest runtime state into the scene-persisted semantic manifest.
+
+        The 3ds Max scene is authoritative for runtime-editable state.  In
+        particular, per-species spacing is reconstructed from each Geometry
+        item's Collision Radius so closing/reopening Forest Manager does not
+        silently restore stale manifest values.
+        """
+        raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+        if not isinstance(raw_groups, list):
+            return manifest, False
+        changed = False
+        groups_by_id = {group.group_id: group for group in self._state.plant_groups if group.manifest_backed}
+        for target in raw_groups:
+            if not isinstance(target, dict):
+                continue
+            group_id = str(target.get("group_id") or "")
+            group = groups_by_id.get(group_id)
+            if group is None:
+                continue
+            if not isinstance(target.get("reset_defaults"), dict):
+                self._canonical_group_reset_defaults(target)
+                changed = True
+            artist_values = target.get("artist_values")
+            if not isinstance(artist_values, dict):
+                artist_values = {}
+                target["artist_values"] = artist_values
+                changed = True
+            try:
+                indices = self._group_geometry_indices(group)
+                enabled = all(
+                    int(self.service.get_array_element(group.forest_name, "geomlist", index, preflight=False).get("value") or 0) != 0
+                    for index in indices
+                )
+                if artist_values.get("species_enabled") is not enabled:
+                    artist_values["species_enabled"] = enabled
+                    changed = True
+
+                # Reconstruct the currently applied Plant Spacing from the
+                # live ForestPack Geometry Collision Radius.  The reset
+                # baseline is persisted in the Max scene manifest; radius=100
+                # means exactly that authored baseline.
+                defaults = self._canonical_group_reset_defaults(target)
+                reset_pair = defaults.get("spacing_system") if isinstance(defaults, dict) else None
+                if isinstance(reset_pair, (list, tuple)) and reset_pair:
+                    baseline = float(reset_pair[0])
+                    radii: list[float] = []
+                    for index in indices:
+                        radius = float(
+                            self.service.get_array_element(
+                                group.forest_name, "radiuslist", index, preflight=False
+                            ).get("value")
+                            or 100.0
+                        )
+                        if radius > 0.0:
+                            radii.append(radius)
+                    if radii and baseline > 0.0:
+                        live_spacing = baseline * (sum(radii) / len(radii)) / 100.0
+                        current_pair = target.get("spacing_system")
+                        current_spacing = (
+                            float(current_pair[0])
+                            if isinstance(current_pair, (list, tuple)) and current_pair
+                            else None
+                        )
+                        if current_spacing is None or abs(current_spacing - live_spacing) > 1e-6:
+                            target["spacing_system"] = [float(live_spacing), float(live_spacing)]
+                            try:
+                                display_spacing, _ = self._system_distance_to_display(
+                                    float(live_spacing), self._state.scene_units
+                                )
+                                artist_values["density_spacing"] = float(display_spacing)
+                            except Exception:
+                                artist_values.pop("density_spacing", None)
+                            changed = True
+            except Exception:
+                pass
+        return manifest, changed
+
+
+    def _prime_group_runtime_cache(self, manifest: dict[str, Any], groups: tuple[PlantGroupTarget, ...]) -> None:
+        """Build lightweight Plant Group UI state from the already-loaded manifest.
+
+        This cache is deliberately scene-read free.  The expensive live Forest Pack
+        readback is reserved for Refresh Scene / Apply / Reset, not tree selection.
+        """
+        raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+        by_id = {
+            str(item.get("group_id") or ""): item
+            for item in (raw_groups or [])
+            if isinstance(item, dict) and str(item.get("group_id") or "").strip()
+        }
+        for group in groups:
+            target = by_id.get(group.group_id) or {}
+            artist = target.get("artist_values") if isinstance(target.get("artist_values"), dict) else {}
+            spacing_pair = target.get("spacing_system")
+            spacing_display = None
+            spacing_suffix = ""
+            if isinstance(spacing_pair, (list, tuple)) and spacing_pair:
+                try:
+                    spacing_display, spacing_suffix = self._system_distance_to_display(
+                        float(spacing_pair[0]), self._state.scene_units
+                    )
+                except Exception:
+                    spacing_display = None
+                    spacing_suffix = ""
+            self._group_runtime_cache[group.group_id] = {
+                "geometry_indices": [],
+                "source_names": [str(value) for value in (target.get("source_names") or []) if str(value).strip()],
+                "enabled": bool(artist.get("species_enabled", True)),
+                "scale_percent": float(artist.get("species_scale_percent", 100.0) or 100.0),
+                "probability_percent": float(artist.get("species_probability_percent", 0.0) or 0.0),
+                "spacing": spacing_display,
+                "spacing_suffix": spacing_suffix,
+            }
+
+    def _select_group_from_cache(self, group: PlantGroupTarget) -> ForestUIState:
+        runtime = dict(self._group_runtime_cache.get(group.group_id) or {})
+        self._state = replace(
+            self._state,
+            selected_group_id=group.group_id,
+            selected_group_label=group.label,
+            selected_forest=group.forest_name,
+            selected_group_runtime=runtime or None,
+            artist_controls=self._artist_control_states(
+                self._state.properties, self._state.scene_units, group
+            ),
+            status=f"Loaded {group.label}",
+            error=None,
+        )
+        return self._state
+
+    def _load_forest(self, forest_name: str, *, preflight: bool, selected_group_id: str | None = None) -> ForestUIState:
         inventory = self.service.inventory(forest_name, preflight=preflight)
         properties = self._property_rows(inventory)
         units = self.service.scene_units(preflight=False)
@@ -181,8 +394,19 @@ class ForestManagerUIController:
         if forest_name not in forests:
             raise ForestControlError(f"Forest target became stale while loading UI state: {forest_name}")
         self._pending.clear()
-        groups = discover_plant_groups(forests)
-        group = find_group_for_forest(groups, forest_name)
+        try:
+            group_manifest = read_plant_group_manifest()
+        except Exception:
+            group_manifest = {}
+        groups = discover_plant_groups(forests, group_manifest)
+        self._prime_group_runtime_cache(group_manifest, groups)
+        group = None
+        if selected_group_id:
+            group = next((item for item in groups if item.group_id == selected_group_id), None)
+        elif self._state.selected_group_id:
+            group = next((item for item in groups if item.group_id == self._state.selected_group_id), None)
+        if group is None and not any(item.manifest_backed for item in groups):
+            group = find_group_for_forest(groups, forest_name)
         self._state = ForestUIState(
             forest_names=tuple(forests),
             primary_forest=discover_primary_forest(forests),
@@ -193,7 +417,8 @@ class ForestManagerUIController:
             properties=properties,
             scene_units=self._unit_payload(units),
             pending_edits=(),
-            artist_controls=self._artist_control_states(properties, self._unit_payload(units)),
+            artist_controls=self._artist_control_states(properties, self._unit_payload(units), group),
+            selected_group_runtime=None,
             bridge_online=True,
             status=(
                 f"Loaded plant group {group.label}: {len(properties)} properties"
@@ -202,6 +427,24 @@ class ForestManagerUIController:
             ),
             error=None,
         )
+        synced_manifest, manifest_changed = self._synchronize_group_manifest_from_scene(group_manifest)
+        if manifest_changed:
+            write_result = write_plant_group_manifest(synced_manifest)
+            if write_result.get("verified") is True:
+                groups = discover_plant_groups(forests, synced_manifest)
+                self._prime_group_runtime_cache(synced_manifest, groups)
+                group = next((item for item in groups if item.group_id == self._state.selected_group_id), None)
+                self._state = replace(
+                    self._state,
+                    plant_groups=groups,
+                    selected_group_label=group.label if group is not None else None,
+                    artist_controls=self._artist_control_states(properties, self._unit_payload(units), group),
+                )
+        if group is not None and group.manifest_backed:
+            runtime = self._read_selected_group_runtime(group)
+            if runtime:
+                self._group_runtime_cache[group.group_id] = dict(runtime)
+            self._state = replace(self._state, selected_group_runtime=runtime)
         return self._state
 
     def refresh_scene(self, *, prefer_max_selection: bool = True) -> ForestUIState:
@@ -246,12 +489,17 @@ class ForestManagerUIController:
             return self._state
 
     def select_plant_group(self, group_id: str) -> ForestUIState:
+        """Switch the editor target without touching 3ds Max.
+
+        Scene synchronization happens on Refresh Scene / Apply / Reset.  Tree
+        navigation is intentionally cache-only so Qt never blocks on bridge I/O.
+        """
         try:
             candidate = str(group_id or "").strip()
             group = next((item for item in self._state.plant_groups if item.group_id == candidate), None)
             if group is None:
                 raise ForestControlError(f"Plant group is stale or missing: {candidate}")
-            return self.select_forest(group.forest_name)
+            return self._select_group_from_cache(group)
         except Exception as exc:
             self._state = replace(
                 self._state,
@@ -261,6 +509,7 @@ class ForestManagerUIController:
             return self._state
 
     def select_global_planting(self) -> ForestUIState:
+        """Select Forest 01 using the existing in-memory scene snapshot only."""
         target = self._state.primary_forest
         if not target:
             self._state = replace(
@@ -269,7 +518,19 @@ class ForestManagerUIController:
                 error="ForestControlError: No primary Forest is available.",
             )
             return self._state
-        return self.select_forest(target)
+        self._state = replace(
+            self._state,
+            selected_group_id=None,
+            selected_group_label=None,
+            selected_forest=target,
+            selected_group_runtime=None,
+            artist_controls=self._artist_control_states(
+                self._state.properties, self._state.scene_units, None
+            ),
+            status="Loaded Forest 01",
+            error=None,
+        )
+        return self._state
 
     def select_forest(self, forest_name: str) -> ForestUIState:
         try:
@@ -383,6 +644,7 @@ class ForestManagerUIController:
         self,
         properties: tuple[PropertyRow, ...],
         scene_units: dict[str, Any] | None = None,
+        group: PlantGroupTarget | None = None,
     ) -> tuple[ArtistControlState, ...]:
         by_name = {row.name.lower(): row for row in properties}
         units = scene_units if scene_units is not None else self._state.scene_units
@@ -442,6 +704,18 @@ class ForestManagerUIController:
                 available = False
                 calibration_status = "blocked_by_capability"
 
+            if group is not None and group.manifest_backed:
+                pending_key = self._group_pending_key(group.group_id, spec.key)
+                pending_edit = self._pending.get(pending_key)
+                if pending_edit is not None:
+                    value = pending_edit.value
+                elif spec.key == "density_spacing" and group.spacing_system is not None:
+                    gx, gy = group.spacing_system
+                    if abs(float(gx) - float(gy)) < 1e-9:
+                        value, display_suffix = self._system_distance_to_display(gx, units)
+                elif spec.key in group.artist_values:
+                    value = group.artist_values[spec.key]
+
             states.append(ArtistControlState(
                 key=spec.key, label=spec.label, kind=spec.kind, value=value,
                 description=spec.description, dependent_properties=spec.dependent_properties,
@@ -468,7 +742,7 @@ class ForestManagerUIController:
         self._state = replace(
             self._state,
             pending_edits=tuple(self._pending.values()),
-            artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units),
+            artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units, self._selected_plant_group()),
             status=f"Naturalness: {choice}",
             error=None,
         )
@@ -491,8 +765,261 @@ class ForestManagerUIController:
         self._state = replace(
             self._state,
             pending_edits=tuple(self._pending.values()),
-            artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units),
+            artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units, self._selected_plant_group()),
             status=f"Cluster Character: {choice}",
+            error=None,
+        )
+        return self._state
+
+
+    def _manifest_group_payload(self, group: PlantGroupTarget) -> dict[str, Any]:
+        manifest = read_plant_group_manifest()
+        raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+        if not isinstance(raw_groups, list):
+            raise ForestControlError("Plant-group manifest is missing or invalid.")
+        target = next(
+            (item for item in raw_groups if isinstance(item, dict) and str(item.get("group_id") or "") == group.group_id),
+            None,
+        )
+        if target is None:
+            raise ForestControlError(f"Plant group is missing from the scene manifest: {group.group_id}")
+        return target
+
+    def _group_geometry_indices(self, group: PlantGroupTarget) -> tuple[int, ...]:
+        target = self._manifest_group_payload(group)
+        source_names = {str(value) for value in (target.get("source_names") or []) if str(value).strip()}
+        if not source_names:
+            raise ForestControlError(f"Plant group has no Geometry source assignment: {group.group_id}")
+        row = next((item for item in self._state.properties if item.name.lower() == "namelist"), None)
+        metadata = row.array_metadata if row is not None else None
+        count = int((metadata or {}).get("count") or 0) if isinstance(metadata, dict) else 0
+        if count <= 0:
+            inventory = self.service.inventory(group.forest_name, preflight=False)
+            item = next(
+                (prop for prop in (inventory.get("properties") or []) if isinstance(prop, dict) and str(prop.get("name") or "").lower() == "namelist"),
+                None,
+            )
+            item_metadata = item.get("array_metadata") if isinstance(item, dict) else None
+            count = int((item_metadata or {}).get("count") or 0) if isinstance(item_metadata, dict) else 0
+        matches: list[int] = []
+        for index in range(count):
+            data = self.service.get_array_element(group.forest_name, "namelist", index, preflight=False)
+            if str(data.get("value") or "") in source_names:
+                matches.append(index)
+        if not matches:
+            raise ForestControlError(f"Plant group Geometry source was not found in {group.forest_name}: {group.group_id}")
+        return tuple(matches)
+
+    def _read_selected_group_runtime(self, group: PlantGroupTarget | None) -> dict[str, Any] | None:
+        if group is None or not group.manifest_backed:
+            return None
+        target = self._manifest_group_payload(group)
+        indices = self._group_geometry_indices(group)
+        enabled_values: list[bool] = []
+        scales: list[float] = []
+        probabilities: list[float] = []
+        for index in indices:
+            enabled_values.append(int(self.service.get_array_element(group.forest_name, "geomlist", index, preflight=False).get("value") or 0) != 0)
+            scales.append(float(self.service.get_array_element(group.forest_name, "ScaleList", index, preflight=False).get("value") or 0.0))
+            probabilities.append(float(self.service.get_array_element(group.forest_name, "problist", index, preflight=False).get("value") or 0.0))
+        spacing_pair = target.get("spacing_system")
+        spacing_display = None
+        spacing_suffix = ""
+        if isinstance(spacing_pair, (list, tuple)) and spacing_pair:
+            spacing_display, spacing_suffix = self._system_distance_to_display(float(spacing_pair[0]), self._state.scene_units)
+        artist_values = target.get("artist_values") if isinstance(target.get("artist_values"), dict) else {}
+        stored_scale = artist_values.get("species_scale_percent") if isinstance(artist_values, dict) else None
+        return {
+            "geometry_indices": list(indices),
+            "source_names": [str(value) for value in (target.get("source_names") or []) if str(value).strip()],
+            "enabled": all(enabled_values),
+            "scale_percent": float(stored_scale) if stored_scale is not None else (scales[0] if scales else 100.0),
+            "probability_percent": probabilities[0] if probabilities else 0.0,
+            "spacing": spacing_display,
+            "spacing_suffix": spacing_suffix,
+        }
+
+    def _refresh_selected_group_runtime_state(self, group: PlantGroupTarget) -> ForestUIState:
+        runtime = self._read_selected_group_runtime(group)
+        self._state = replace(self._state, selected_group_runtime=runtime)
+        return self._state
+
+    @staticmethod
+    def _group_pending_key(group_id: str, field: str) -> str:
+        return f"__plant_group__|{group_id}|{field}"
+
+    def _selected_group_runtime_cached(self, group: PlantGroupTarget) -> dict[str, Any]:
+        if self._state.selected_group_id == group.group_id and self._state.selected_group_runtime:
+            return dict(self._state.selected_group_runtime)
+        runtime = self._read_selected_group_runtime(group)
+        return dict(runtime or {})
+
+    def _stage_group_artist_edit(
+        self, group: PlantGroupTarget, field: str, value: Any, editor_kind: str
+    ) -> ForestUIState:
+        original_value = group.artist_values.get(field)
+        key = self._group_pending_key(group.group_id, field)
+        if value == original_value:
+            self._pending.pop(key, None)
+        else:
+            self._pending[key] = PendingEdit(key, original_value, value, editor_kind)
+        self._artist_values[field] = value
+        self._state = replace(
+            self._state,
+            pending_edits=tuple(self._pending.values()),
+            artist_controls=self._artist_control_states(
+                self._state.properties, self._state.scene_units, self._selected_plant_group()
+            ),
+            status=f"{len(self._pending)} pending change(s)" if self._pending else f"Loaded {group.label}",
+            error=None,
+        )
+        return self._state
+
+    def _stage_all_groups_artist_edit(self, field: str, value: Any, editor_kind: str) -> ForestUIState:
+        groups = tuple(group for group in self._state.plant_groups if group.manifest_backed)
+        if not groups:
+            raise ForestControlError("Forest 01 has no manifest-backed Plant Groups.")
+        for group in groups:
+            original_value = group.artist_values.get(field)
+            key = self._group_pending_key(group.group_id, field)
+            if value == original_value:
+                self._pending.pop(key, None)
+            else:
+                self._pending[key] = PendingEdit(key, original_value, value, editor_kind)
+        self._artist_values[field] = value
+        self._state = replace(
+            self._state,
+            pending_edits=tuple(self._pending.values()),
+            artist_controls=self._artist_control_states(
+                self._state.properties, self._state.scene_units, None
+            ),
+            status=(
+                f"Forest 01: {field.replace('_', ' ').title()} staged for {len(groups)} Plant Groups"
+                if self._pending
+                else "Loaded Forest 01"
+            ),
+            error=None,
+        )
+        return self._state
+
+    def _stage_group_edit(
+        self, group: PlantGroupTarget, field: str, original_value: Any, value: Any, editor_kind: str
+    ) -> ForestUIState:
+        key = self._group_pending_key(group.group_id, field)
+        if value == original_value:
+            self._pending.pop(key, None)
+        else:
+            self._pending[key] = PendingEdit(key, original_value, value, editor_kind)
+        runtime = dict(self._state.selected_group_runtime or {})
+        runtime_key = {
+            "enabled": "enabled",
+            "scale": "scale_percent",
+            "probability": "probability_percent",
+        }[field]
+        runtime[runtime_key] = value
+        self._group_runtime_cache[group.group_id] = dict(runtime)
+        self._state = replace(
+            self._state,
+            selected_group_runtime=runtime,
+            pending_edits=tuple(self._pending.values()),
+            status=f"{len(self._pending)} pending change(s)" if self._pending else f"Loaded {group.label}",
+            error=None,
+        )
+        return self._state
+
+    def set_selected_group_enabled(self, enabled: bool) -> ForestUIState:
+        try:
+            group = self._selected_plant_group()
+            if group is None or not group.manifest_backed:
+                raise ForestControlError("Select a Plant Group before changing species visibility.")
+            runtime = self._selected_group_runtime_cached(group)
+            return self._stage_group_edit(group, "enabled", bool(runtime.get("enabled")), bool(enabled), "bool")
+        except Exception as exc:
+            self._state = replace(self._state, status="Plant Group visibility edit rejected", error=f"{type(exc).__name__}: {exc}")
+            return self._state
+
+    def set_selected_group_scale(self, percent: Any) -> ForestUIState:
+        try:
+            value = float(str(percent).replace(",", "."))
+            if value <= 0.0:
+                raise ForestControlError("Plant Group scale must be greater than zero.")
+            group = self._selected_plant_group()
+            if group is None or not group.manifest_backed:
+                raise ForestControlError("Select a Plant Group before changing species scale.")
+            runtime = self._selected_group_runtime_cached(group)
+            original = float(runtime.get("scale_percent") if runtime.get("scale_percent") is not None else 100.0)
+            return self._stage_group_edit(group, "scale", original, value, "float")
+        except Exception as exc:
+            self._state = replace(self._state, status="Plant Group scale edit rejected", error=f"{type(exc).__name__}: {exc}")
+            return self._state
+
+    def set_selected_group_probability(self, percent: Any) -> ForestUIState:
+        try:
+            value = float(str(percent).replace(",", "."))
+            if value < 0.0 or value > 100.0:
+                raise ForestControlError("Plant Group probability must be between 0 and 100.")
+            group = self._selected_plant_group()
+            if group is None or not group.manifest_backed:
+                raise ForestControlError("Select a Plant Group before changing species probability.")
+            runtime = self._selected_group_runtime_cached(group)
+            original = float(runtime.get("probability_percent") if runtime.get("probability_percent") is not None else 0.0)
+            return self._stage_group_edit(group, "probability", original, value, "float")
+        except Exception as exc:
+            self._state = replace(self._state, status="Plant Group probability edit rejected", error=f"{type(exc).__name__}: {exc}")
+            return self._state
+
+    def _selected_plant_group(self) -> PlantGroupTarget | None:
+        group_id = self._state.selected_group_id
+        if not group_id:
+            return None
+        return next((item for item in self._state.plant_groups if item.group_id == group_id), None)
+
+    def _persist_group_artist_control(self, group: PlantGroupTarget, key: str, value: Any) -> ForestUIState:
+        manifest = read_plant_group_manifest()
+        raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+        if not isinstance(raw_groups, list):
+            raise ForestControlError("Plant-group manifest is missing or invalid.")
+        target = next(
+            (item for item in raw_groups if isinstance(item, dict) and str(item.get("group_id") or "") == group.group_id),
+            None,
+        )
+        if target is None:
+            raise ForestControlError(f"Plant group is missing from the scene manifest: {group.group_id}")
+        artist_values = target.get("artist_values")
+        if not isinstance(artist_values, dict):
+            artist_values = {}
+            target["artist_values"] = artist_values
+        artist_values[key] = value
+        if key == "density_spacing":
+            raw_spacing = self._display_distance_to_system(value, self._state.scene_units)
+            target["spacing_system"] = [raw_spacing, raw_spacing]
+        previous_manifest = read_plant_group_manifest()
+        write_result = write_plant_group_manifest(manifest)
+        if write_result.get("verified") is not True:
+            raise ForestControlError("Plant-group artist setting write was not verified.")
+        if key == "density_spacing":
+            try:
+                execution = execute_plant_group_manifest(manifest, service=self.service)
+                if execution.get("verified") is not True:
+                    raise ForestControlError("Plant-group distribution execution was not verified.")
+            except Exception:
+                write_plant_group_manifest(previous_manifest)
+                raise
+        readback = read_plant_group_manifest()
+        readback_groups = readback.get("groups") if isinstance(readback, dict) else None
+        readback_target = next(
+            (item for item in (readback_groups or []) if isinstance(item, dict) and str(item.get("group_id") or "") == group.group_id),
+            None,
+        )
+        if readback_target is None:
+            raise ForestControlError("Plant-group artist setting readback did not contain the selected group.")
+        rb_values = readback_target.get("artist_values") if isinstance(readback_target.get("artist_values"), dict) else {}
+        if rb_values.get(key) != value:
+            raise ForestControlError("Plant-group artist setting readback mismatch.")
+        state = self._load_forest(group.forest_name, preflight=False, selected_group_id=group.group_id)
+        self._state = replace(
+            state,
+            status=f"{group.label}: {key.replace('_', ' ').title()} updated in 3ds Max" if key == "density_spacing" else f"{group.label}: {key.replace('_', ' ').title()} updated",
             error=None,
         )
         return self._state
@@ -503,6 +1030,44 @@ class ForestManagerUIController:
             if key not in specs:
                 raise ForestControlError(f"Unknown artist control: {key}")
             spec = specs[key]
+            group = self._selected_plant_group()
+            if group is None and self._state.selected_forest and self._state.plant_groups:
+                # Forest 01 is a semantic parent, not a fourth planting layer.
+                # Parent-level artist edits must fan out to all child Plant Groups
+                # so the RGB diversity-map channels are regenerated together.
+                if spec.kind == "choice":
+                    token = str(value)
+                    if token not in spec.options:
+                        raise ForestControlError(f"Invalid artist control value for {spec.label}: {token}")
+                    if key in {"naturalness", "cluster_character"}:
+                        return self._stage_all_groups_artist_edit(key, token, "choice")
+                    if key == "variation":
+                        raise ForestControlError("Variation is not available until its Forest Pack activation flags are writable.")
+                if key == "density_spacing":
+                    try:
+                        spacing = float(str(value).replace(",", "."))
+                    except Exception as exc:
+                        raise ForestControlError("Plant Spacing requires a positive numeric value.") from exc
+                    if spacing <= 0.0:
+                        raise ForestControlError("Plant Spacing must be greater than zero.")
+                    return self._stage_all_groups_artist_edit(key, spacing, "float")
+            if group is not None and group.manifest_backed:
+                if spec.kind == "choice":
+                    token = str(value)
+                    if token not in spec.options:
+                        raise ForestControlError(f"Invalid artist control value for {spec.label}: {token}")
+                    if key == "variation":
+                        raise ForestControlError("Variation is not available until its Forest Pack activation flags are writable.")
+                    if key in {"naturalness", "cluster_character"}:
+                        return self._stage_group_artist_edit(group, key, token, "choice")
+                if key == "density_spacing":
+                    try:
+                        spacing = float(str(value).replace(",", "."))
+                    except Exception as exc:
+                        raise ForestControlError("Plant Spacing requires a positive numeric value.") from exc
+                    if spacing <= 0.0:
+                        raise ForestControlError("Plant Spacing must be greater than zero.")
+                    return self._stage_group_artist_edit(group, key, spacing, "float")
             if spec.kind == "choice":
                 token = str(value)
                 if token not in spec.options:
@@ -540,7 +1105,7 @@ class ForestManagerUIController:
                 self._state = replace(
                     self._state,
                     pending_edits=tuple(self._pending.values()),
-                    artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units),
+                    artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units, self._selected_plant_group()),
                     status=f"Plant Spacing: {spacing:g} {suffix}",
                     error=None,
                 )
@@ -664,14 +1229,131 @@ class ForestManagerUIController:
 
     def revert_pending(self) -> ForestUIState:
         self._pending.clear()
+        runtime = self._state.selected_group_runtime
+        group = self._selected_plant_group()
+        if group is not None and group.manifest_backed:
+            try:
+                runtime = self._read_selected_group_runtime(group)
+            except Exception:
+                pass
         self._state = replace(
             self._state,
             pending_edits=(),
-            artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units),
+            selected_group_runtime=runtime,
+            artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units, group),
             status=f"Pending edits reverted for {self._state.selected_forest}" if self._state.selected_forest else "Pending edits reverted",
             error=None,
         )
         return self._state
+
+    def reset_selected_target(self) -> ForestUIState:
+        """Restore scene-persisted authored defaults and apply them to Max immediately."""
+        try:
+            forest_name = self._state.selected_forest
+            if not forest_name:
+                raise ForestControlError("No Forest selected.")
+            manifest = read_plant_group_manifest()
+            raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+            if not isinstance(raw_groups, list) or not raw_groups:
+                raise ForestControlError("Plant-group manifest is missing or invalid.")
+
+            if self._state.selected_group_id:
+                target_ids = {self._state.selected_group_id}
+            else:
+                target_ids = {
+                    group.group_id for group in self._state.plant_groups
+                    if group.manifest_backed and group.forest_name == forest_name
+                }
+            if not target_ids:
+                raise ForestControlError("No managed Plant Group is available to reset.")
+
+            touched_ids: list[str] = []
+            for item in raw_groups:
+                if not isinstance(item, dict):
+                    continue
+                group_id = str(item.get("group_id") or "")
+                if group_id not in target_ids:
+                    continue
+                defaults = self._canonical_group_reset_defaults(item)
+                spacing = defaults.get("spacing_system")
+                default_artist = defaults.get("artist_values")
+                if not isinstance(spacing, (list, tuple)) or len(spacing) != 2 or not isinstance(default_artist, dict):
+                    raise ForestControlError(f"Plant Group reset defaults are invalid: {group_id}")
+                item["spacing_system"] = [float(spacing[0]), float(spacing[1])]
+                artist_values = item.get("artist_values")
+                if not isinstance(artist_values, dict):
+                    artist_values = {}
+                    item["artist_values"] = artist_values
+                artist_values["species_enabled"] = bool(default_artist.get("species_enabled", True))
+                artist_values["species_scale_percent"] = float(default_artist.get("species_scale_percent", 100.0))
+                artist_values["naturalness"] = str(default_artist.get("naturalness") or "Balanced")
+                artist_values["cluster_character"] = str(default_artist.get("cluster_character") or "Medium Clusters")
+                artist_values.pop("density_spacing", None)
+                touched_ids.append(group_id)
+
+            if set(touched_ids) != set(target_ids):
+                raise ForestControlError("One or more Plant Groups became stale before Reset.")
+            write_result = write_plant_group_manifest(manifest)
+            if write_result.get("verified") is not True:
+                raise ForestControlError("Reset manifest write was not verified.")
+
+            # Reset is deliberately a full scene rebuild, not the interactive
+            # fast path.  This forces ForestPack to re-evaluate the currently
+            # edited Area spline, rebind the diversity map, restore the
+            # authored grid/collision values, and rebuild the scatter even if
+            # the spline geometry changed while Forest Manager was closed.
+            distribution_result = execute_plant_group_manifest(manifest, service=self.service, strict_acceptance=False)
+            if distribution_result.get("verified") is not True:
+                raise ForestControlError("Reset scene rebuild was not verified.")
+
+            current_groups = {group.group_id: group for group in self._state.plant_groups}
+            for group_id in touched_ids:
+                group = current_groups.get(group_id)
+                if group is None:
+                    raise ForestControlError(f"Plant Group became stale during Reset: {group_id}")
+                target = next(
+                    (item for item in raw_groups if isinstance(item, dict) and str(item.get("group_id") or "") == group_id),
+                    None,
+                )
+                defaults = (target or {}).get("reset_defaults") if isinstance(target, dict) else {}
+                default_artist = defaults.get("artist_values") if isinstance(defaults, dict) else {}
+                species_ids: list[int] = []
+                for index in self._group_geometry_indices(group):
+                    value = int(self.service.get_array_element(group.forest_name, "specidlist", index, preflight=False).get("value") or 0)
+                    if value > 0:
+                        species_ids.append(value)
+                if not species_ids:
+                    raise ForestControlError(f"Plant Group species IDs could not be resolved during Reset: {group_id}")
+                apply_plant_group_species_runtime(
+                    group.forest_name,
+                    species_ids,
+                    enabled=bool((default_artist or {}).get("species_enabled", True)),
+                    scale_percent=float((default_artist or {}).get("species_scale_percent", 100.0)),
+                )
+
+            self._pending.clear()
+            groups = discover_plant_groups(self._state.forest_names, manifest)
+            selected_group = next((g for g in groups if g.group_id == self._state.selected_group_id), None)
+            runtime = self._read_selected_group_runtime(selected_group) if selected_group is not None else None
+            self._state = replace(
+                self._state,
+                plant_groups=groups,
+                selected_group_label=selected_group.label if selected_group is not None else None,
+                pending_edits=(),
+                selected_group_runtime=runtime,
+                artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units, selected_group),
+                status=(
+                    f"Reset {selected_group.label} to scene-authored defaults"
+                    if selected_group is not None
+                    else "Reset Forest 01 Plant Groups to scene-authored defaults"
+                ),
+                error=None,
+            )
+            return self._state
+        except Exception as exc:
+            self._state = replace(self._state, status="Reset failed", error=f"{type(exc).__name__}: {exc}")
+        return self._state
+
 
     def apply_pending(self) -> ForestUIState:
         try:
@@ -683,19 +1365,173 @@ class ForestManagerUIController:
             forests = self.service.list_forests(preflight=True)
             if forest_name not in forests:
                 raise ForestControlError(f"Selected Forest became stale before Apply: {forest_name}")
-            operations = tuple(
-                UnifiedControlOperation(property_name=edit.property_name, value=edit.value, label="ui")
-                for edit in self._pending.values()
+
+            group_edits = [edit for edit in self._pending.values() if edit.property_name.startswith("__plant_group__|")]
+            forest_edits = [edit for edit in self._pending.values() if not edit.property_name.startswith("__plant_group__|")]
+            applied_count = 0
+            previous_manifest = read_plant_group_manifest() if group_edits else None
+            manifest = read_plant_group_manifest() if group_edits else None
+            raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+            if group_edits and not isinstance(raw_groups, list):
+                raise ForestControlError("Plant-group manifest is missing or invalid.")
+
+            applied_group_edits: list[tuple[PendingEdit, PlantGroupTarget]] = []
+            try:
+                for edit in group_edits:
+                    _, group_id, field = edit.property_name.split("|", 2)
+                    group = next((item for item in self._state.plant_groups if item.group_id == group_id), None)
+                    if group is None or not group.manifest_backed:
+                        raise ForestControlError(f"Plant Group became stale before Apply: {group_id}")
+                    indices = self._group_geometry_indices(group)
+                    if field not in {"enabled", "scale", "probability", "naturalness", "cluster_character", "density_spacing"}:
+                        raise ForestControlError(f"Unsupported Plant Group pending field: {field}")
+
+                    target = next(
+                        (item for item in raw_groups if isinstance(item, dict) and str(item.get("group_id") or "") == group_id),
+                        None,
+                    )
+                    if target is None:
+                        raise ForestControlError(f"Plant group is missing from the scene manifest: {group_id}")
+                    artist_values = target.get("artist_values")
+                    if not isinstance(artist_values, dict):
+                        artist_values = {}
+                        target["artist_values"] = artist_values
+                    if field == "enabled":
+                        artist_values["species_enabled"] = bool(edit.value)
+                    elif field == "scale":
+                        artist_values["species_scale_percent"] = float(edit.value)
+                    elif field == "probability":
+                        artist_values["species_probability_percent"] = float(edit.value)
+                    elif field in {"naturalness", "cluster_character"}:
+                        artist_values[field] = edit.value
+                    elif field == "density_spacing":
+                        artist_values[field] = float(edit.value)
+                        raw_spacing = self._display_distance_to_system(float(edit.value), self._state.scene_units)
+                        target["spacing_system"] = [raw_spacing, raw_spacing]
+                    applied_group_edits.append((edit, group))
+                    applied_count += 1
+
+                if group_edits:
+                    write_result = write_plant_group_manifest(manifest)
+                    if write_result.get("verified") is not True:
+                        raise ForestControlError("Plant-group pending settings were not persisted.")
+
+                    # Only rebuild/rebind the Diversity Map for controls that
+                    # actually change spatial distribution. Geometry-only
+                    # controls such as Scale must not reset the map/viewport.
+                    edited_fields = {edit.property_name.split("|", 2)[2] for edit in group_edits}
+                    if "density_spacing" in edited_fields:
+                        execution = refresh_plant_group_distribution_fast(manifest, service=self.service)
+                        if execution.get("verified") is not True:
+                            raise ForestControlError("Plant-group spacing Apply did not refresh the single-Forest distribution.")
+                    elif edited_fields & {"enabled", "naturalness", "cluster_character"}:
+                        execution = refresh_plant_group_diversity_map(manifest)
+                        if execution.get("verified") is not True:
+                            raise ForestControlError("Plant-group map Apply was not verified.")
+
+                    # Geometry item edits use a single bridge transaction per group.
+                    # This avoids repeated GET/SET/update/redraw cycles and forces a
+                    # Custom Object cache rebind when Scale changes.
+                    grouped: dict[str, dict[str, Any]] = {}
+                    group_targets: dict[str, PlantGroupTarget] = {}
+                    for edit in group_edits:
+                        _, group_id, field = edit.property_name.split("|", 2)
+                        group = next((item for item in self._state.plant_groups if item.group_id == group_id), None)
+                        if group is None or not group.manifest_backed:
+                            raise ForestControlError(f"Plant Group became stale during Apply: {group_id}")
+                        group_targets[group_id] = group
+                        bucket = grouped.setdefault(group_id, {})
+                        if field == "enabled":
+                            bucket["enabled"] = bool(edit.value)
+                        elif field == "scale":
+                            bucket["scale_percent"] = float(edit.value)
+                        elif field == "probability":
+                            bucket["probability_percent"] = float(edit.value)
+                    for group_id, values in grouped.items():
+                        group = group_targets[group_id]
+                        target = next(
+                            (item for item in raw_groups if isinstance(item, dict) and str(item.get("group_id") or "") == group_id),
+                            None,
+                        )
+                        source_names = [str(value) for value in ((target or {}).get("source_names") or []) if str(value).strip()]
+                        source_map = self._group_geometry_indices(group)
+                        species_ids: list[int] = []
+                        for index in source_map:
+                            species_ids.append(int(self.service.get_array_element(group.forest_name, "specidlist", index, preflight=False).get("value") or 0))
+                        species_ids = [value for value in species_ids if value > 0]
+                        if not species_ids:
+                            raise ForestControlError(f"Plant Group species IDs could not be resolved: {group_id}")
+                        apply_plant_group_species_runtime(group.forest_name, species_ids, **values)
+
+                if forest_edits:
+                    operations = tuple(
+                        UnifiedControlOperation(property_name=edit.property_name, value=edit.value, label="ui")
+                        for edit in forest_edits
+                    )
+                    result = self.transaction_manager.execute(
+                        operations, default_forest_name=forest_name, rollback_on_success=False
+                    )
+                    if not result.write_verified:
+                        raise ForestControlError("UI transaction did not verify all writes.")
+                    applied_count += result.operation_count
+            except Exception:
+                if previous_manifest is not None:
+                    try:
+                        write_plant_group_manifest(previous_manifest)
+                    except Exception:
+                        pass
+                for edit, group in reversed(applied_group_edits):
+                    try:
+                        _, _, field = edit.property_name.split("|", 2)
+                        for index in self._group_geometry_indices(group):
+                            if field == "enabled":
+                                self.service.set_array_element(group.forest_name, "geomlist", index, 2 if bool(edit.original_value) else 0, preflight=False)
+                            elif field == "scale":
+                                self.service.set_array_element(group.forest_name, "ScaleList", index, float(edit.original_value), preflight=False)
+                            elif field == "probability":
+                                self.service.set_array_element(group.forest_name, "problist", index, float(edit.original_value), preflight=False)
+                            elif field in {"naturalness", "cluster_character", "density_spacing"}:
+                                pass
+                    except Exception:
+                        pass
+                raise
+
+            self._pending.clear()
+            # Rebuild the lightweight Plant Group targets from the manifest that
+            # was just persisted.  Keeping the pre-Apply tuple here caused the UI
+            # to repaint the old spacing (for example 75 m) immediately after a
+            # successful 300 m Apply even though the scene manifest had changed.
+            refreshed_groups = self._state.plant_groups
+            if group_edits and isinstance(manifest, dict):
+                try:
+                    refreshed_groups = discover_plant_groups(forests, manifest)
+                except Exception:
+                    refreshed_groups = self._state.plant_groups
+            selected_group_id = self._state.selected_group_id
+            selected_group = next(
+                (item for item in refreshed_groups if item.group_id == selected_group_id),
+                None,
+            ) if selected_group_id else None
+            # Apply must not immediately perform another synchronous Max readback.
+            # The just-persisted manifest is already the authoritative UI snapshot;
+            # rebuild the lightweight runtime cache from it and keep the selection
+            # stable.  Explicit Refresh Scene remains the path for scene readback.
+            runtime = self._state.selected_group_runtime
+            if group_edits and isinstance(manifest, dict):
+                self._prime_group_runtime_cache(manifest, tuple(refreshed_groups))
+            if selected_group is not None and selected_group.manifest_backed:
+                cached_runtime = dict(self._group_runtime_cache.get(selected_group.group_id) or {})
+                if cached_runtime:
+                    runtime = cached_runtime
+            self._state = replace(
+                self._state,
+                plant_groups=tuple(refreshed_groups),
+                pending_edits=(),
+                selected_group_runtime=runtime,
+                artist_controls=self._artist_control_states(self._state.properties, self._state.scene_units, selected_group),
+                status=f"Applied {applied_count} change(s) to {forest_name}",
+                error=None,
             )
-            result = self.transaction_manager.execute(
-                operations,
-                default_forest_name=forest_name,
-                rollback_on_success=False,
-            )
-            if not result.write_verified:
-                raise ForestControlError("UI transaction did not verify all writes.")
-            state = self._load_forest(forest_name, preflight=False)
-            self._state = replace(state, status=f"Applied {result.operation_count} change(s) to {forest_name}")
             return self._state
         except Exception as exc:
             self._state = replace(self._state, status="Apply failed", error=f"{type(exc).__name__}: {exc}")

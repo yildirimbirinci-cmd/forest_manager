@@ -1,18 +1,24 @@
 from __future__ import annotations
 
 import base64
+import ctypes
 import json
 import os
+import re
+import shutil
 import socket
 import time
 from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 49491
-EXPECTED_BRIDGE_VERSION = "0.9.54"
-EXPECTED_BRIDGE_BUILD_ID = "stage8-13-atomic-source-area-contract-20260816a"
+EXPECTED_BRIDGE_VERSION = "0.9.79"
+EXPECTED_BRIDGE_BUILD_ID = "stage8-versioned-bridge-no-watcher-20260817a"
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
+RELOAD_BOOTSTRAP_FILENAME = "ForestManager_BridgeBootstrap.ms"
+STAGED_BRIDGE_FILENAME = "ForestManager_Bridge_0_9_79.ms"
+DISABLED_STARTUP_SUFFIX = ".fm_disabled"
 
 
 def _maxscript_string(value: str) -> str:
@@ -38,6 +44,20 @@ def _startup_loader_text(bridge_path: Path) -> str:
     )
 
 
+def _remove_legacy_reload_bootstrap() -> None:
+    """Remove obsolete runtime-generated bootstrap scripts.
+
+    Runtime bridge updates must not create or execute temporary MaxScript files while
+    3ds Max is running. Versioned runtime bridge files are packaged ahead of time.
+    """
+    target = project_root() / "maxscripts" / RELOAD_BOOTSTRAP_FILENAME
+    try:
+        if target.is_file():
+            target.unlink()
+    except OSError:
+        pass
+
+
 def install_startup_bridge_loader() -> list[Path]:
     """Install/update the 3ds Max per-user startup loader for every detected Max profile."""
     local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
@@ -47,7 +67,7 @@ def install_startup_bridge_loader() -> list[Path]:
     profiles_root = Path(local_appdata) / "Autodesk" / "3dsMax"
     if not profiles_root.is_dir():
         return []
-    bridge_path = project_root() / "maxscripts" / "ForestManager_Bridge.ms"
+    bridge_path = _bridge_source_path()
     if not bridge_path.is_file():
         raise RuntimeError("Forest Manager bridge file not found: " + str(bridge_path))
     loader_text = _startup_loader_text(bridge_path)
@@ -62,8 +82,20 @@ def install_startup_bridge_loader() -> list[Path]:
                 continue
             startup_dir.mkdir(parents=True, exist_ok=True)
             target = startup_dir / AUTO_STARTUP_FILENAME
-            current = target.read_text(encoding="utf-8") if target.is_file() else ""
-            if current != loader_text:
+            # Remove obsolete Forest Manager bridge/startup copies so only this
+            # canonical loader can start the listener. Never touch unrelated scripts.
+            for legacy in startup_dir.glob("ForestManager*Bridge*.ms"):
+                if legacy.name == AUTO_STARTUP_FILENAME:
+                    continue
+                try:
+                    legacy.unlink()
+                except OSError:
+                    pass
+            # Never rewrite an existing startup script during normal runtime.
+            # Rewriting startup scripts can trigger 3ds Max security/new-script
+            # notifications when the application regains focus.  Installation
+            # owns creation; runtime only reuses an already-installed loader.
+            if not target.is_file():
                 target.write_text(loader_text, encoding="utf-8", newline="\n")
             installed.append(target)
     return installed
@@ -71,6 +103,203 @@ def install_startup_bridge_loader() -> list[Path]:
 
 def project_root() -> Path:
     return Path(__file__).resolve().parents[3]
+
+
+def _bridge_source_path() -> Path:
+    """Return this release's immutable, versioned bridge file.
+
+    Runtime updates never overwrite ForestManager_Bridge.ms. 3ds Max may keep an
+    older bridge document open in MAXScript Editor without seeing any external
+    modification to that file.
+    """
+    return project_root() / "maxscripts" / STAGED_BRIDGE_FILENAME
+
+
+def _staged_bridge_path() -> Path:
+    return _bridge_source_path()
+
+def _source_identity(path: Path) -> tuple[str, str]:
+    if not path.is_file():
+        return "", ""
+    text = path.read_text(encoding="utf-8", errors="replace")
+    version_match = re.search(r'\\\"bridge_version\\\":\\\"([^\\\"]+)\\\"', text)
+    build_match = re.search(r'\\\"bridge_build_id\\\":\\\"([^\\\"]+)\\\"', text)
+    return (
+        version_match.group(1) if version_match else "",
+        build_match.group(1) if build_match else "",
+    )
+
+
+def _startup_targets() -> list[Path]:
+    local_appdata = os.environ.get("LOCALAPPDATA", "").strip()
+    if not local_appdata:
+        return []
+    profiles_root = Path(local_appdata) / "Autodesk" / "3dsMax"
+    if not profiles_root.is_dir():
+        return []
+    targets: list[Path] = []
+    for version_dir in profiles_root.iterdir():
+        if not version_dir.is_dir():
+            continue
+        for locale_dir in version_dir.iterdir():
+            if not locale_dir.is_dir():
+                continue
+            startup_dir = locale_dir / "scripts" / "startup"
+            if startup_dir.is_dir():
+                targets.append(startup_dir / AUTO_STARTUP_FILENAME)
+    return targets
+
+
+def _disable_startup_loaders() -> list[tuple[Path, Path]]:
+    disabled: list[tuple[Path, Path]] = []
+    for target in _startup_targets():
+        disabled_target = target.with_name(target.name + DISABLED_STARTUP_SUFFIX)
+        try:
+            if disabled_target.exists():
+                disabled_target.unlink()
+            if target.exists():
+                target.replace(disabled_target)
+                disabled.append((target, disabled_target))
+        except OSError:
+            continue
+    return disabled
+
+
+def _enable_startup_loaders(canonical_bridge: Path, disabled: list[tuple[Path, Path]]) -> list[Path]:
+    loader_text = _startup_loader_text(canonical_bridge)
+    targets = [pair[0] for pair in disabled] or _startup_targets()
+    enabled: list[Path] = []
+    for target in targets:
+        try:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(loader_text, encoding="utf-8", newline="\n")
+            disabled_target = target.with_name(target.name + DISABLED_STARTUP_SUFFIX)
+            if disabled_target.exists():
+                disabled_target.unlink()
+            enabled.append(target)
+        except OSError:
+            continue
+    return enabled
+
+
+def _window_text(hwnd: int) -> str:
+    if os.name != "nt":
+        return ""
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(hwnd)
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value
+
+
+def _enum_windows() -> list[int]:
+    if os.name != "nt":
+        return []
+    user32 = ctypes.windll.user32
+    handles: list[int] = []
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    @callback_type
+    def callback(hwnd, _lparam):
+        if user32.IsWindowVisible(hwnd):
+            handles.append(int(hwnd))
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return handles
+
+
+def _enum_children(parent: int) -> list[int]:
+    if os.name != "nt":
+        return []
+    user32 = ctypes.windll.user32
+    handles: list[int] = []
+    callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+
+    @callback_type
+    def callback(hwnd, _lparam):
+        handles.append(int(hwnd))
+        return True
+
+    user32.EnumChildWindows(parent, callback, 0)
+    return handles
+
+
+def _close_tracked_bridge_editor_tab() -> bool:
+    """Resolve the current bridge file watcher prompt and close only that tab."""
+    if os.name != "nt":
+        return False
+    user32 = ctypes.windll.user32
+    BM_CLICK = 0x00F5
+    GW_OWNER = 4
+    WM_COMMAND = 0x0111
+    IDM_CLOSE = 105
+    for hwnd in _enum_windows():
+        if _window_text(hwnd).strip().lower() != "maxscript":
+            continue
+        children = _enum_children(hwnd)
+        child_text = "\n".join(_window_text(child) for child in children).lower()
+        if "forestmanager_bridge.ms" not in child_text or "modified outside the application" not in child_text:
+            continue
+        owner = int(user32.GetWindow(hwnd, GW_OWNER) or 0)
+        for child in children:
+            label = _window_text(child).strip().lower()
+            if label in {"hayır", "hayir", "no"}:
+                user32.SendMessageW(child, BM_CLICK, 0, 0)
+                time.sleep(0.15)
+                break
+        if owner:
+            user32.SendMessageW(owner, WM_COMMAND, IDM_CLOSE, 0)
+            time.sleep(0.15)
+        return True
+    return False
+
+
+def _close_bridge_editor_tab_if_visible() -> bool:
+    """Close the bridge document before replacing it, without closing other tabs."""
+    if os.name != "nt":
+        return False
+    user32 = ctypes.windll.user32
+    WM_COMMAND = 0x0111
+    IDM_CLOSE = 105
+    IDM_NEXTFILE = 502
+    target = "forestmanager_bridge.ms"
+    for hwnd in _enum_windows():
+        title = _window_text(hwnd).strip().lower()
+        if "maxscript" not in title and "scripting editor" not in title:
+            continue
+        if title == "maxscript":
+            continue
+        start_title = title
+        for _ in range(20):
+            current = _window_text(hwnd).strip().lower()
+            if target in current:
+                user32.SendMessageW(hwnd, WM_COMMAND, IDM_CLOSE, 0)
+                time.sleep(0.1)
+                return True
+            user32.SendMessageW(hwnd, WM_COMMAND, IDM_NEXTFILE, 0)
+            time.sleep(0.05)
+            if _ > 0 and _window_text(hwnd).strip().lower() == start_title:
+                break
+    return False
+
+
+def _promote_staged_bridge_update() -> bool:
+    """Compatibility no-op. Versioned runtime bridges are never promoted/renamed."""
+    return False
+
+
+def _bridge_source_identity() -> tuple[str, str]:
+    return _source_identity(_bridge_source_path())
+
+def verify_local_bridge_source() -> None:
+    version, build_id = _bridge_source_identity()
+    if version != EXPECTED_BRIDGE_VERSION or build_id != EXPECTED_BRIDGE_BUILD_ID:
+        raise RuntimeError(
+            "Local bridge source identity mismatch: "
+            + f"source_version={version}, source_build_id={build_id}, "
+            + f"expected_version={EXPECTED_BRIDGE_VERSION}, expected_build_id={EXPECTED_BRIDGE_BUILD_ID}"
+        )
 
 
 def send_command(command: str, timeout: float = 10.0) -> dict:
@@ -109,15 +338,18 @@ def current_version() -> str:
 
 
 def reload_current_bridge() -> dict:
-    bridge_path = project_root() / "maxscripts" / "ForestManager_Bridge.ms"
+    bridge_path = _bridge_source_path()
     if not bridge_path.is_file():
         raise RuntimeError("Forest Manager bridge file not found: " + str(bridge_path))
+    _remove_legacy_reload_bootstrap()
+    # Normal reloads use only the canonical bridge. Version upgrades are staged
+    # separately and promoted only after the old startup/run path is disabled.
     encoded = base64.b64encode(str(bridge_path).encode("utf-8")).decode("ascii")
     response = send_command("RELOAD_BRIDGE|" + encoded, timeout=5.0)
     if not response.get("ok"):
         raise RuntimeError("Bridge reload request failed: " + json.dumps(response, ensure_ascii=False))
     last_error = ""
-    for _ in range(40):
+    for _ in range(60):
         time.sleep(0.2)
         try:
             ping = send_command("PING", timeout=1.0)
@@ -137,20 +369,292 @@ def reload_current_bridge() -> dict:
 
 
 def ensure_current_bridge() -> dict:
-    startup_paths = install_startup_bridge_loader()
+    """Ensure the packaged versioned bridge is active without modifying old scripts.
 
+    If an older listener is running, ask that listener to load this release's new
+    versioned .ms file. No existing .ms file is overwritten or renamed.
+    """
+    verify_local_bridge_source()
+
+    listener_reachable = False
     try:
         version, build_id = current_bridge_identity()
+        listener_reachable = bool(version or build_id)
         if version == EXPECTED_BRIDGE_VERSION and build_id == EXPECTED_BRIDGE_BUILD_ID:
-            return send_command("PING", timeout=1.5)
+            ping = send_command("PING", timeout=1.5)
+            managed = send_command("FM_MANAGED_ENSURE", timeout=5.0)
+            if not managed.get("ok"):
+                raise RuntimeError("Managed scene policy failed: " + json.dumps(managed, ensure_ascii=False))
+            return ping
     except Exception:
-        pass
-    try:
-        return reload_current_bridge()
-    except Exception as exc:
-        startup_note = ""
-        if startup_paths:
-            startup_note = " Automatic startup loader installed for: " + ", ".join(str(path) for path in startup_paths) + ". Restart 3ds Max once if no bridge is currently listening."
+        listener_reachable = False
+
+    if not listener_reachable:
         raise RuntimeError(
-            "Automatic bridge preflight failed." + startup_note + " Details: " + str(exc)
+            "No Forest Manager listener is running. Start 3ds Max with the existing bridge once, "
+            "then run this command again. The updater will load the new versioned bridge without "
+            "modifying the old script file."
+        )
+
+    try:
+        ping = reload_current_bridge()
+        managed = send_command("FM_MANAGED_ENSURE", timeout=5.0)
+        if not managed.get("ok"):
+            raise RuntimeError("Managed scene policy failed after bridge reload: " + json.dumps(managed, ensure_ascii=False))
+        return ping
+    except Exception as exc:
+        raise RuntimeError(
+            "Versioned bridge handoff failed. No existing .ms file was modified. Details: " + str(exc)
         ) from exc
+
+
+def _encode_token(value: str) -> str:
+    return base64.b64encode(value.encode("utf-8")).decode("ascii")
+
+
+def ensure_managed_scene() -> dict:
+    """Adopt Forest Manager objects into the protected FM_MANAGED layer hierarchy."""
+    response = send_command("FM_MANAGED_ENSURE")
+    if not response.get("ok"):
+        raise RuntimeError("Managed scene policy failed: " + json.dumps(response, ensure_ascii=False))
+    return response.get("data") or {}
+
+
+def protect_managed_scene() -> dict:
+    response = send_command("FM_MANAGED_PROTECT_ALL")
+    if not response.get("ok"):
+        raise RuntimeError("Managed scene protection failed: " + json.dumps(response, ensure_ascii=False))
+    return response.get("data") or {}
+
+
+def create_managed_forest(name: str, role: str = "plant_group") -> dict:
+    if not name.strip():
+        raise ValueError("Managed Forest name cannot be empty.")
+    command = "FM_MANAGED_CREATE_FOREST|" + _encode_token(name) + "|" + _encode_token(role)
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Managed Forest creation failed: " + json.dumps(response, ensure_ascii=False))
+    return response.get("data") or {}
+
+
+def delete_managed_forest(name: str) -> dict:
+    if not name.strip():
+        raise ValueError("Managed Forest name cannot be empty.")
+    response = send_command("FM_MANAGED_DELETE_FOREST|" + _encode_token(name))
+    if not response.get("ok"):
+        raise RuntimeError("Managed Forest deletion failed: " + json.dumps(response, ensure_ascii=False))
+    return response.get("data") or {}
+
+
+def managed_scene_status() -> dict:
+    response = send_command("FM_MANAGED_STATUS")
+    if not response.get("ok"):
+        raise RuntimeError("Managed scene status failed: " + json.dumps(response, ensure_ascii=False))
+    return response.get("data") or {}
+
+
+def read_plant_group_manifest() -> dict:
+    response = send_command("FM_PLANT_GROUP_MANIFEST_GET")
+    if not response.get("ok"):
+        raise RuntimeError("Plant-group manifest read failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    manifest = data.get("manifest")
+    return manifest if isinstance(manifest, dict) else {}
+
+
+def write_plant_group_manifest(manifest: dict) -> dict:
+    if not isinstance(manifest, dict):
+        raise TypeError("Plant-group manifest must be a dict.")
+    payload = json.dumps(manifest, ensure_ascii=False, separators=(",", ":"))
+    response = send_command("FM_PLANT_GROUP_MANIFEST_SET|" + _encode_token(payload))
+    if not response.get("ok"):
+        raise RuntimeError("Plant-group manifest write failed: " + json.dumps(response, ensure_ascii=False))
+    return response.get("data") or {}
+
+
+def upsert_plant_group_area(
+    forest_name: str,
+    group_key: str,
+    base_area_index: int,
+    species_csv: str,
+    scale_percent: float,
+) -> dict:
+    if base_area_index < 0:
+        raise ValueError("Plant-group base Area index must be zero or greater.")
+    if not species_csv.strip():
+        raise ValueError("Plant-group species selection cannot be empty.")
+    if float(scale_percent) <= 0.0:
+        raise ValueError("Plant-group Area scale must be greater than zero.")
+    command = "|".join((
+        "FM_PLANT_GROUP_AREA_UPSERT",
+        _encode_token(forest_name),
+        _encode_token(group_key),
+        str(int(base_area_index)),
+        _encode_token(species_csv),
+        repr(float(scale_percent)),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Plant-group Area update failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Plant-group Area update was not verified.")
+    return data
+
+
+
+def bind_single_forest_diversity_map(
+    forest_name: str,
+    map_path: str | Path,
+    *,
+    strict_verify: bool = True,
+) -> dict:
+    path = Path(map_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError("Single-Forest diversity map was not found: " + str(path))
+    command = "|".join((
+        "FM_SINGLE_FOREST_DIVERSITY_MAP_BIND",
+        _encode_token(forest_name),
+        _encode_token(str(path)),
+        "1" if strict_verify else "0",
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Single-Forest diversity map binding failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Single-Forest diversity map binding was not verified.")
+    return data
+
+
+
+def refresh_single_forest_diversity_map(forest_name: str, map_path: str | Path) -> dict:
+    """Fast UI refresh: rebind the RGB diversity map without the expensive generated-item acceptance scan."""
+    path = Path(map_path).resolve()
+    if not path.is_file():
+        raise FileNotFoundError("Single-Forest diversity map was not found: " + str(path))
+    command = "|".join((
+        "FM_SINGLE_FOREST_DIVERSITY_MAP_REFRESH",
+        _encode_token(forest_name),
+        _encode_token(str(path)),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Single-Forest diversity map refresh failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Single-Forest diversity map refresh was not verified.")
+    return data
+
+
+
+def get_single_forest_area_bounds(forest_name: str) -> dict:
+    command = "|".join((
+        "FM_SINGLE_FOREST_AREA_BOUNDS",
+        _encode_token(forest_name),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Single-Forest area bounds read failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Single-Forest area bounds were not verified.")
+    return data
+
+def get_single_forest_distribution_diagnostics(forest_name: str) -> dict:
+    command = "|".join((
+        "FM_SINGLE_FOREST_DISTRIBUTION_DIAGNOSTICS",
+        _encode_token(forest_name),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Single-Forest distribution diagnostics failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Single-Forest distribution diagnostics were not verified.")
+    return data
+
+
+def apply_plant_group_species_runtime(
+    forest_name: str,
+    species_ids: list[int] | tuple[int, ...],
+    *,
+    enabled: bool | None = None,
+    scale_percent: float | None = None,
+    probability_percent: float | None = None,
+) -> dict:
+    """Apply Geometry-item edits in one MaxScript transaction and one Forest rebuild."""
+    ids = [int(value) for value in species_ids]
+    if not ids:
+        raise ValueError("At least one species ID is required.")
+    if scale_percent is not None and float(scale_percent) <= 0.0:
+        raise ValueError("Species scale must be greater than zero.")
+    if probability_percent is not None and not (0.0 <= float(probability_percent) <= 100.0):
+        raise ValueError("Species probability must be between 0 and 100.")
+    enabled_token = "-" if enabled is None else ("1" if enabled else "0")
+    scale_token = "-" if scale_percent is None else repr(float(scale_percent))
+    probability_token = "-" if probability_percent is None else repr(float(probability_percent))
+    command = "|".join((
+        "FM_PLANT_GROUP_SPECIES_FAST_APPLY",
+        _encode_token(forest_name),
+        _encode_token(",".join(str(value) for value in ids)),
+        enabled_token,
+        scale_token,
+        probability_token,
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Plant-group species fast apply failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Plant-group species fast apply was not verified.")
+    return data
+
+def finalize_plant_group_areas(
+    forest_name: str,
+    base_area_indices: list[int] | tuple[int, ...],
+    group_keys: list[str] | tuple[str, ...],
+) -> dict:
+    command = "|".join((
+        "FM_PLANT_GROUP_AREA_FINALIZE",
+        _encode_token(forest_name),
+        _encode_token(",".join(str(int(value)) for value in base_area_indices)),
+        _encode_token(",".join(str(value) for value in group_keys)),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Plant-group Area finalize failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Plant-group Area finalize was not verified.")
+    return data
+
+
+def list_closed_spline_candidates() -> list[dict]:
+    """Return closed spline candidates from the active 3ds Max scene.
+
+    The bridge reports scene/system-unit measurements so callers never need to
+    assume meters/centimeters.  This is read-only.
+    """
+    response = send_command("FM_CLOSED_SPLINE_CANDIDATES")
+    if not response.get("ok"):
+        raise RuntimeError("Closed spline discovery failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Closed spline discovery was not verified.")
+    values = data.get("candidates") or []
+    return [dict(item) for item in values if isinstance(item, dict)]
+
+
+def ensure_primary_forest_for_spline(spline_name: str) -> dict:
+    """Idempotently create/rebind FM_Forest_001 to one named closed spline."""
+    if not str(spline_name).strip():
+        raise ValueError("A closed spline name is required.")
+    command = "FM_STAGE8_ENSURE_PRIMARY_FOREST|" + _encode_token(str(spline_name).strip())
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Stage 8 primary Forest ensure failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Stage 8 primary Forest ensure was not verified.")
+    return data

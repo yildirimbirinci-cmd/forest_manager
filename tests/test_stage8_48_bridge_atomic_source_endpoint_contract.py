@@ -1,4 +1,4 @@
-from pathlib import Path
+﻿from pathlib import Path
 
 
 def test_maxscript_exposes_named_atomic_geometry_source_endpoints():
@@ -9,5 +9,5 @@ def test_maxscript_exposes_named_atomic_geometry_source_endpoints():
     assert "FOREST_CONTROL_REMOVE_GEOMETRY_SOURCE_TAIL" in bridge
     assert "fn addNamedGeometrySourceJson" in bridge
     assert "fn removeGeometrySourceTailJson" in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in runtime
-    assert 'stage8-13-atomic-source-area-contract-20260816a' in runtime
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in runtime
+    assert 'stage8-versioned-bridge-no-watcher-20260817a' in runtime

@@ -22,8 +22,8 @@ try:
         QHBoxLayout,
         QLabel,
         QLineEdit,
-        QListWidget,
-        QListWidgetItem,
+        QTreeWidget,
+        QTreeWidgetItem,
         QMainWindow,
         QMessageBox,
         QPushButton,
@@ -96,6 +96,9 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         self._tables: dict[str, QTableWidget] = {}
         self._artist_editors: dict[str, QWidget] = {}
         self._updating_artist_controls = False
+        self._updating_group_controls = False
+        self._rendered_properties_ref = None
+        self._rendered_pending_names: frozenset[str] = frozenset()
         self.setWindowTitle("Forest Manager")
         self.resize(1280, 800)
         self._build_ui()
@@ -122,20 +125,16 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
 
         left = QWidget()
         left_layout = QVBoxLayout(left)
-        self.global_planting_button = QPushButton("All Planting (Global)")
-        self.global_planting_button.setToolTip(
-            "Edit the primary Forest target. Plant Groups below are artist-facing groups; technical Forest layer names stay hidden."
-        )
-        self.global_planting_button.clicked.connect(self._select_global_planting)
-        left_layout.addWidget(self.global_planting_button)
         self.plant_group_label = QLabel("Plant Groups (0)")
         left_layout.addWidget(self.plant_group_label)
-        self.forest_list = QListWidget()
+        self.forest_list = QTreeWidget()
+        self.forest_list.setHeaderHidden(True)
         self.forest_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.forest_list.currentItemChanged.connect(self._plant_group_changed)
         left_layout.addWidget(self.forest_list, 1)
         group_note = QLabel(
-            "Group count is dynamic. Forest Manager maps each group to the minimum technical Forest targets required by Forest Pack."
+            "Each Plant Group maps to one or more Geometry species inside the primary Forest. "
+            "Selecting a group edits only those species; no additional Forest or Area is created."
         )
         group_note.setWordWrap(True)
         left_layout.addWidget(group_note)
@@ -145,6 +144,28 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         right_layout = QVBoxLayout(right)
         self.selected_label = QLabel("No Forest selected")
         right_layout.addWidget(self.selected_label)
+
+        self.group_controls = QGroupBox("Selected Plant Group")
+        group_form = QFormLayout(self.group_controls)
+        self.group_species_label = QLabel("-")
+        self.group_species_label.setWordWrap(True)
+        self.group_enabled = QCheckBox("Enabled")
+        self.group_enabled.toggled.connect(self._group_enabled_changed)
+        self.group_scale = CompactDoubleSpinBox()
+        self.group_scale.setDecimals(2)
+        self.group_scale.setRange(0.01, 10000.0)
+        self.group_scale.setSuffix(" %")
+        self.group_scale.editingFinished.connect(self._group_scale_changed)
+        self.group_probability = CompactDoubleSpinBox()
+        self.group_probability.setDecimals(2)
+        self.group_probability.setRange(0.0, 100.0)
+        self.group_probability.setSuffix(" %")
+        self.group_probability.editingFinished.connect(self._group_probability_changed)
+        group_form.addRow("Species", self.group_species_label)
+        group_form.addRow("Visibility", self.group_enabled)
+        group_form.addRow("Species Size", self.group_scale)
+        group_form.addRow("Probability", self.group_probability)
+        right_layout.addWidget(self.group_controls)
 
         self.mode_tabs = QTabWidget()
         self.mode_tabs.addTab(self._create_artist_controls_page(), "Artist Controls")
@@ -167,11 +188,15 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
 
         actions = QHBoxLayout()
         self.pending_label = QLabel("No pending changes")
+        self.reset_button = QPushButton("Reset")
         self.revert_button = QPushButton("Revert")
         self.apply_button = QPushButton("Apply")
+        self.reset_button.setToolTip("Restore the selected Plant Group, or all Forest 01 groups, to Forest Manager defaults in both the UI and 3ds Max.")
+        self.reset_button.clicked.connect(self.reset_selected_target)
         self.revert_button.clicked.connect(self.revert_pending)
         self.apply_button.clicked.connect(self.apply_pending)
         actions.addWidget(self.pending_label, 1)
+        actions.addWidget(self.reset_button)
         actions.addWidget(self.revert_button)
         actions.addWidget(self.apply_button)
         right_layout.addLayout(actions)
@@ -223,6 +248,21 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
             return
         self._apply_state(self.controller.set_artist_control(key, value))
 
+    def _group_enabled_changed(self, enabled: bool) -> None:
+        if self._updating_group_controls:
+            return
+        self._apply_state(self.controller.set_selected_group_enabled(bool(enabled)))
+
+    def _group_scale_changed(self) -> None:
+        if self._updating_group_controls:
+            return
+        self._apply_state(self.controller.set_selected_group_scale(self.group_scale.value()))
+
+    def _group_probability_changed(self) -> None:
+        if self._updating_group_controls:
+            return
+        self._apply_state(self.controller.set_selected_group_probability(self.group_probability.value()))
+
     def _create_property_table(self) -> QTableWidget:
         table = QTableWidget(0, 5)
         table.setHorizontalHeaderLabels(["Property", "Class", "Mode", "Control", "Value"])
@@ -247,13 +287,16 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
             return False
         return True
 
-    def _plant_group_changed(self, current: QListWidgetItem | None, _previous: QListWidgetItem | None) -> None:
+    def _plant_group_changed(self, current: QTreeWidgetItem | None, _previous: QTreeWidgetItem | None) -> None:
         if self._updating_forest_list or current is None:
             return
-        group_id = current.data(Qt.ItemDataRole.UserRole)
-        if not group_id or not self._confirm_target_switch():
+        target_id = current.data(0, Qt.ItemDataRole.UserRole)
+        if not target_id or not self._confirm_target_switch():
             return
-        self._apply_state(self.controller.select_plant_group(str(group_id)))
+        if target_id == "__forest_01__":
+            self._apply_state(self.controller.select_global_planting())
+            return
+        self._apply_state(self.controller.select_plant_group(str(target_id)))
 
     def _select_global_planting(self) -> None:
         if not self._confirm_target_switch():
@@ -292,6 +335,12 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
                 return
         self._apply_state(self.controller.select_max_selection())
 
+    def reset_selected_target(self) -> None:
+        state = self.controller.reset_selected_target()
+        self._apply_state(state)
+        if state.error:
+            QMessageBox.warning(self, "Forest Manager", state.error)
+
     def revert_pending(self) -> None:
         self._apply_state(self.controller.revert_pending())
 
@@ -311,37 +360,63 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         if state.selected_group_label:
             self.selected_label.setText(f"Plant Group: {state.selected_group_label}")
         elif state.selected_forest:
-            self.selected_label.setText("All Planting (Global)")
+            self.selected_label.setText("Forest 01")
         else:
             self.selected_label.setText("No planting target selected")
 
-        current_group_ids = tuple(
-            str(self.forest_list.item(i).data(Qt.ItemDataRole.UserRole) or "")
-            for i in range(self.forest_list.count())
-        )
+        runtime = state.selected_group_runtime or {}
+        group_runtime_available = bool(state.selected_group_id and runtime)
+        self.group_controls.setEnabled(group_runtime_available and state.bridge_online)
+        self._updating_group_controls = True
+        try:
+            sources = runtime.get("source_names") or []
+            self.group_species_label.setText(", ".join(str(value) for value in sources) if sources else "-")
+            self.group_enabled.setChecked(bool(runtime.get("enabled")) if group_runtime_available else False)
+            if runtime.get("scale_percent") is not None:
+                self.group_scale.setValue(float(runtime.get("scale_percent")))
+            if runtime.get("probability_percent") is not None:
+                self.group_probability.setValue(float(runtime.get("probability_percent")))
+        finally:
+            self._updating_group_controls = False
+
+        current_group_ids: tuple[str, ...] = ()
+        root_item = self.forest_list.topLevelItem(0)
+        if root_item is not None:
+            current_group_ids = tuple(
+                str(root_item.child(i).data(0, Qt.ItemDataRole.UserRole) or "")
+                for i in range(root_item.childCount())
+            )
         next_group_ids = tuple(group.group_id for group in state.plant_groups)
         if current_group_ids != next_group_ids:
             self._updating_forest_list = True
             try:
                 self.forest_list.clear()
+                root_item = QTreeWidgetItem(["Forest 01"])
+                root_item.setData(0, Qt.ItemDataRole.UserRole, "__forest_01__")
+                root_item.setToolTip(0, "Scene Forest group. Expand to edit its Plant Groups.")
+                self.forest_list.addTopLevelItem(root_item)
                 for group in state.plant_groups:
-                    item = QListWidgetItem(group.label)
-                    item.setData(Qt.ItemDataRole.UserRole, group.group_id)
-                    item.setToolTip("Artist planting group")
-                    self.forest_list.addItem(item)
+                    item = QTreeWidgetItem([group.label])
+                    item.setData(0, Qt.ItemDataRole.UserRole, group.group_id)
+                    item.setToolTip(0, "Artist planting group")
+                    root_item.addChild(item)
+                root_item.setExpanded(True)
             finally:
                 self._updating_forest_list = False
         self.plant_group_label.setText(f"Plant Groups ({len(state.plant_groups)})")
-        self.global_planting_button.setEnabled(bool(state.primary_forest) and state.bridge_online)
+        self.forest_list.setEnabled(bool(state.primary_forest) and state.bridge_online)
 
         self._updating_forest_list = True
         try:
-            if state.selected_group_id:
-                for index in range(self.forest_list.count()):
-                    item = self.forest_list.item(index)
-                    if item.data(Qt.ItemDataRole.UserRole) == state.selected_group_id:
+            root_item = self.forest_list.topLevelItem(0)
+            if state.selected_group_id and root_item is not None:
+                for index in range(root_item.childCount()):
+                    item = root_item.child(index)
+                    if item.data(0, Qt.ItemDataRole.UserRole) == state.selected_group_id:
                         self.forest_list.setCurrentItem(item)
                         break
+            elif state.selected_forest and root_item is not None:
+                self.forest_list.setCurrentItem(root_item)
             else:
                 self.forest_list.clearSelection()
                 self.forest_list.setCurrentItem(None)
@@ -373,10 +448,22 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         )
         self.apply_button.setEnabled(bool(state.pending_edits) and state.bridge_online)
         self.revert_button.setEnabled(bool(state.pending_edits))
+        self.reset_button.setEnabled(bool(state.selected_forest) and state.bridge_online)
 
-        for label, table in self._tables.items():
-            rows = state.properties if label == "All Properties" else tuple(row for row in state.properties if row.domain == label)
-            self._populate_properties(table, rows, pending_names)
+        property_pending_names = frozenset(
+            name for name in pending_names if not name.startswith("__plant_group__|")
+        )
+        if (
+            self._rendered_properties_ref is not state.properties
+            or self._rendered_pending_names != property_pending_names
+        ):
+            for label, table in self._tables.items():
+                rows = state.properties if label == "All Properties" else tuple(
+                    row for row in state.properties if row.domain == label
+                )
+                self._populate_properties(table, rows, pending_names)
+            self._rendered_properties_ref = state.properties
+            self._rendered_pending_names = property_pending_names
 
         self.statusBar().showMessage(state.error or state.status)
 

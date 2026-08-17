@@ -13,6 +13,11 @@
 */
 
 global ForestManagerBridge
+global ForestManagerBridgeReloadTimer
+global ForestManagerBridgeReloadPath
+
+-- Atomic reload bootstrap state lives outside ForestManagerBridgeState so
+-- replacing/stopping the old bridge cannot dispose the reload callback itself.
 
 struct ForestManagerBridgeState
 (
@@ -50,8 +55,8 @@ struct ForestManagerBridgeState
         local maxYear = if mv.count >= 8 then mv[8] else 0
         "{\"max_year\":" + (maxYear as string) +
         ",\"max_version\":" + (jsonString (mv as string)) +
-        ",\"bridge_version\":\"0.9.54\"" +
-        ",\"bridge_build_id\":\"stage8-13-atomic-source-area-contract-20260816a\"}"
+        ",\"bridge_version\":\"0.9.79\"" +
+        ",\"bridge_build_id\":\"stage8-versioned-bridge-no-watcher-20260817a\"}"
     ),
 
     fn getDisplayUnitName =
@@ -200,6 +205,78 @@ struct ForestManagerBridgeState
         )
 
         (length areaVector) * 0.5
+    ),
+
+    fn closedSplineCandidatesJson =
+    (
+        local oneMeterSystemUnits = units.decodeValue "1m"
+        if oneMeterSystemUnits <= 0.0 do throw "Scene unit conversion is invalid."
+
+        local values = #()
+        for node in objects do
+        (
+            local splineCount = 0
+            local allClosed = false
+            try
+            (
+                if superClassOf node == Shape then
+                (
+                    splineCount = numSplines node
+                    if splineCount > 0 then
+                    (
+                        allClosed = true
+                        for splineIndex = 1 to splineCount while allClosed do
+                        (
+                            if not (isClosed node splineIndex) do allClosed = false
+                        )
+                    )
+                )
+            )
+            catch
+            (
+                splineCount = 0
+                allClosed = false
+            )
+
+            if splineCount > 0 and allClosed do
+            (
+                local totalAreaSystemSquared = 0.0
+                for splineIndex = 1 to splineCount do
+                    totalAreaSystemSquared += sampledClosedSplineAreaSystemSquared node splineIndex samples:256
+
+                local bb = nodeGetBoundingBox node node.transform
+                local size = bb[2] - bb[1]
+                local width = abs size.x
+                local depth = abs size.y
+                local areaSquareMeters = totalAreaSystemSquared / (oneMeterSystemUnits * oneMeterSystemUnits)
+                local isManaged = false
+                try (isManaged = matchPattern node.name pattern:"FM_*" ignoreCase:true) catch (isManaged = false)
+
+                append values #(node.name, splineCount, totalAreaSystemSquared, areaSquareMeters, width, depth, isManaged)
+            )
+        )
+
+        local json = "["
+        for i = 1 to values.count do
+        (
+            if i > 1 do json += ","
+            local item = values[i]
+            json += "{\"node_name\":" + jsonString item[1] +
+                    ",\"spline_count\":" + (item[2] as string) +
+                    ",\"all_splines_closed\":true" +
+                    ",\"area_system_units_squared\":" + (item[3] as string) +
+                    ",\"area_square_meters\":" + (item[4] as string) +
+                    ",\"width_system_units\":" + (item[5] as string) +
+                    ",\"depth_system_units\":" + (item[6] as string) +
+                    ",\"forest_manager_owned\":" + boolJson item[7] +
+                    "}"
+        )
+        json += "]"
+
+        "{\"candidate_count\":" + (values.count as string) +
+        ",\"candidates\":" + json +
+        ",\"scene_units\":" + getSceneUnitsJson() +
+        ",\"read_only\":true,\"verified\":true}"
     ),
 
     fn getSelectionSplineAreaJson =
@@ -625,6 +702,54 @@ struct ForestManagerBridgeState
         true
     ),
 
+    fn ensureStage8PrimaryForestJson splineName =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        local splineNode = getNodeByName splineName
+        if splineNode == undefined do throw ("Closed spline was not found: " + splineName)
+
+        local splineCount = 0
+        try (splineCount = numSplines splineNode) catch (splineCount = 0)
+        if splineCount < 1 do throw "Stage 8 boundary must be a spline."
+        for splineIndex = 1 to splineCount do
+            if not (isClosed splineNode splineIndex) do throw "Stage 8 boundary splines must all be closed."
+
+        local forestNode = getNodeByName "FM_Forest_001"
+        local created = false
+        if forestNode == undefined then
+        (
+            forestNode = ::Forest_Pro()
+            setForestPointCloudDisplay forestNode
+            forestNode.name = "FM_Forest_001"
+            created = true
+        )
+        else
+        (
+            local isForest = false
+            try (isForest = isKindOf forestNode ::Forest_Pro) catch (isForest = false)
+            if not isForest do throw "FM_Forest_001 exists but is not a Forest Pack Forest object."
+        )
+
+        local boundIndex = 0
+        if isProperty forestNode #arnodelist then
+        (
+            for i = 1 to forestNode.arnodelist.count while boundIndex == 0 do
+                if forestNode.arnodelist[i] == splineNode do boundIndex = i
+        )
+        if boundIndex == 0 do boundIndex = addSplineIncludeArea forestNode splineNode
+        if not (verifySplineArea forestNode splineNode boundIndex) do throw "Stage 8 primary Forest Area verification failed."
+
+        try (markForestManagerOwnedNode forestNode role:"primary_forest") catch()
+        try (setUserProp forestNode "ForestManagerSiteBoundary" splineNode.name) catch()
+        completeRedraw()
+
+        "{\"forest_name\":" + jsonString forestNode.name +
+        ",\"spline_name\":" + jsonString splineNode.name +
+        ",\"area_index\":" + (boundIndex as string) +
+        ",\"created\":" + boolJson created +
+        ",\"verified\":true}"
+    ),
+
     fn collectManagedForestSourceNodes forestNode =
     (
         local result = #()
@@ -642,7 +767,8 @@ struct ForestManagerBridgeState
     fn collectOwnedReferenceLayerNodes =
     (
         local result = #()
-        local refLayer = LayerManager.getLayerFromName "FM_References"
+        local refLayer = LayerManager.getLayerFromName "FM_REFERENCES"
+        if refLayer == undefined do refLayer = LayerManager.getLayerFromName "FM_References"
         if refLayer == undefined do return result
 
         local layerNodes = #()
@@ -712,7 +838,7 @@ struct ForestManagerBridgeState
         try
         (
             local nodeLayer = node.layer
-            if nodeLayer != undefined do result = (nodeLayer.name == "FM_References")
+            if nodeLayer != undefined do result = (nodeLayer.name == "FM_References" or nodeLayer.name == "FM_REFERENCES")
         )
         catch()
         result
@@ -2108,10 +2234,31 @@ struct ForestManagerBridgeState
     -- 3ds Max 2020 MaxScript because struct member resolution is order-sensitive.
     fn getOrCreateReferenceLayer =
     (
-        local layerName = "FM_References"
-        local refLayer = LayerManager.getLayerFromName layerName
-        if refLayer == undefined do
-            refLayer = LayerManager.newLayerFromName layerName
+        local managedLayer = LayerManager.getLayerFromName "FM_MANAGED"
+        if managedLayer == undefined do managedLayer = LayerManager.newLayerFromName "FM_MANAGED"
+        if managedLayer == undefined do throw "Unable to create or resolve FM_MANAGED layer."
+        try (managedLayer.lock = false) catch()
+        try (managedLayer.isFrozen = false) catch()
+        try (managedLayer.on = true) catch()
+
+        local refLayer = LayerManager.getLayerFromName "FM_REFERENCES"
+        if refLayer == undefined do refLayer = LayerManager.newLayerFromName "FM_REFERENCES"
+        if refLayer == undefined do throw "Unable to create or resolve FM_REFERENCES layer."
+        try (refLayer.lock = false) catch()
+        try (refLayer.isFrozen = false) catch()
+        try (refLayer.on = false) catch()
+
+        local parentOk = false
+        try
+        (
+            local currentParent = refLayer.getParent()
+            if currentParent == managedLayer then
+                parentOk = true
+            else
+                parentOk = refLayer.setParent managedLayer
+        )
+        catch (parentOk = false)
+        if not parentOk do throw "Unable to parent FM_REFERENCES under FM_MANAGED."
         refLayer
     ),
 
@@ -2135,15 +2282,25 @@ struct ForestManagerBridgeState
         try (refLayer.addNode node) catch()
         markForestManagerOwnedNode node role:"reference_source"
 
-        -- Layer visibility off. Do not hide the Forest object itself.
+        -- Reference sources stay hidden and protected from direct artist edits.
         try (refLayer.on = false) catch()
+        try (refLayer.isFrozen = true) catch()
+        try (refLayer.lock = true) catch()
+        local managedLayer = LayerManager.getLayerFromName "FM_MANAGED"
+        if managedLayer != undefined do
+        (
+            try (managedLayer.on = true) catch()
+            try (managedLayer.isFrozen = true) catch()
+            try (managedLayer.lock = true) catch()
+        )
 
         true
     ),
 
-    fn raiseBridgeError message =
+    fn reportBridgeError message =
     (
-        throw message
+        format "%\n" message
+        true
     ),
 
     fn currentExceptionDetails prefix =
@@ -2200,7 +2357,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError (currentExceptionDetails "MERGE_STEP[mergeMAXFile]: ")
+            reportBridgeError (currentExceptionDetails "MERGE_STEP[mergeMAXFile]: ")
+            throw()
         )
 
         local afterObjects = objects as array
@@ -2224,7 +2382,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError ("MERGE_STEP[chooseMergedSourceNode]: " + (getCurrentException()))
+            reportBridgeError ("MERGE_STEP[chooseMergedSourceNode]: " + (getCurrentException()))
+            throw()
         )
         if sourceNode == undefined do
             throw "MERGE_STEP[chooseMergedSourceNode]: Could not choose a Forest source from merged nodes."
@@ -2243,7 +2402,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError ("MERGE_STEP[prepareReferenceNode]: " + (getCurrentException()))
+            reportBridgeError ("MERGE_STEP[prepareReferenceNode]: " + (getCurrentException()))
+            throw()
         )
 
         local dimensions = undefined
@@ -2253,7 +2413,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError ("MERGE_STEP[bindForestGeometrySource]: " + (getCurrentException()))
+            reportBridgeError ("MERGE_STEP[bindForestGeometrySource]: " + (getCurrentException()))
+            throw()
         )
 
         local splineNode = findForestAreaSpline forestNode
@@ -2986,7 +3147,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError (currentExceptionDetails "APPEND_STEP[mergeMAXFile]: ")
+            reportBridgeError (currentExceptionDetails "APPEND_STEP[mergeMAXFile]: ")
+            throw()
         )
         local afterObjects = objects as array
         local newObjects = for obj in afterObjects where (findItem beforeObjects obj) == 0 collect obj
@@ -3036,7 +3198,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError ("APPEND_STEP[prepareReferenceNode]: " + (getCurrentException()))
+            reportBridgeError ("APPEND_STEP[prepareReferenceNode]: " + (getCurrentException()))
+            throw()
         )
 
         local currentCount = if isProperty forestNode #cobjlist then forestNode.cobjlist.count else 0
@@ -3048,7 +3211,8 @@ struct ForestManagerBridgeState
         )
         catch
         (
-            raiseBridgeError ("APPEND_STEP[setGeometryItemAtIndex]: " + (getCurrentException()))
+            reportBridgeError ("APPEND_STEP[setGeometryItemAtIndex]: " + (getCurrentException()))
+            throw()
         )
         equalizeGeometryProbabilities forestNode
 
@@ -5115,7 +5279,8 @@ struct ForestManagerBridgeState
         )
         directNodesJson += "]"
 
-        local refsLayer = LayerManager.getLayerFromName "FM_References"
+        local refsLayer = LayerManager.getLayerFromName "FM_REFERENCES"
+        if refsLayer == undefined do refsLayer = LayerManager.getLayerFromName "FM_References"
         local managedRefs = #()
         if refsLayer != undefined do
         (
@@ -5992,48 +6157,54 @@ struct ForestManagerBridgeState
 
         try
         (
-            if reloadTimer != undefined do
+            if ForestManagerBridgeReloadTimer != undefined do
             (
-                reloadTimer.Stop()
-                reloadTimer.Dispose()
+                ForestManagerBridgeReloadTimer.Stop()
+                ForestManagerBridgeReloadTimer.Dispose()
             )
         )
         catch()
 
-        reloadPath = scriptPath
-        reloadTimer = dotNetObject "System.Windows.Forms.Timer"
-        reloadTimer.Interval = 250
-        dotNet.addEventHandler reloadTimer "Tick" (fn onForestManagerBridgeReloadTick sender args =
+        ForestManagerBridgeReloadPath = scriptPath
+        ForestManagerBridgeReloadTimer = dotNetObject "System.Windows.Forms.Timer"
+        ForestManagerBridgeReloadTimer.Interval = 500
+        dotNet.addEventHandler ForestManagerBridgeReloadTimer "Tick" (fn onForestManagerAtomicBridgeReloadTick sender args =
         (
-            if ForestManagerBridge != undefined do
+            local pathToLoad = ForestManagerBridgeReloadPath
+            try
             (
-                local pathToLoad = ForestManagerBridge.reloadPath
-                try
+                if ForestManagerBridgeReloadTimer != undefined do
                 (
-                    if ForestManagerBridge.reloadTimer != undefined do
-                    (
-                        ForestManagerBridge.reloadTimer.Stop()
-                        ForestManagerBridge.reloadTimer.Dispose()
-                        ForestManagerBridge.reloadTimer = undefined
-                    )
-
-                    if pathToLoad != undefined and doesFileExist pathToLoad then
-                    (
-                        format "Forest Manager Bridge auto-reload: %\n" pathToLoad
-                        fileIn pathToLoad
-                    )
-                    else
-                    (
-                        format "Forest Manager Bridge auto-reload failed: script not found.\n"
-                    )
-                )
-                catch
-                (
-                    format "Forest Manager Bridge auto-reload failed: %\n" (getCurrentException())
+                    ForestManagerBridgeReloadTimer.Stop()
+                    ForestManagerBridgeReloadTimer.Dispose()
                 )
             )
+            catch()
+            ForestManagerBridgeReloadTimer = undefined
+            ForestManagerBridgeReloadPath = undefined
+
+            -- The RELOAD_BRIDGE response has already been returned. Stop the old
+            -- listener completely before loading the one canonical bridge source.
+            try (if ForestManagerBridge != undefined do ForestManagerBridge.stop()) catch()
+
+            try
+            (
+                if pathToLoad != undefined and doesFileExist pathToLoad then
+                (
+                    format "Forest Manager Bridge atomic reload: %\n" pathToLoad
+                    fileIn pathToLoad quiet:true
+                )
+                else
+                (
+                    format "Forest Manager Bridge atomic reload failed: script not found.\n"
+                )
+            )
+            catch
+            (
+                format "Forest Manager Bridge atomic reload failed: %\n" (getCurrentException())
+            )
         ))
-        reloadTimer.Start()
+        ForestManagerBridgeReloadTimer.Start()
         true
     ),
 
@@ -6880,6 +7051,1201 @@ struct ForestManagerBridgeState
         ",\"verified\":true}"
     ),
 
+    fn getManagedLayer =
+    (
+        local managedLayer = LayerManager.getLayerFromName "FM_MANAGED"
+        if managedLayer == undefined do managedLayer = LayerManager.newLayerFromName "FM_MANAGED"
+        if managedLayer == undefined do throw "Unable to create or resolve FM_MANAGED layer."
+        managedLayer
+    ),
+
+    fn getOrCreateManagedChildLayer layerName =
+    (
+        local managedLayer = getManagedLayer()
+        local childLayer = LayerManager.getLayerFromName layerName
+        if childLayer == undefined do childLayer = LayerManager.newLayerFromName layerName
+        if childLayer == undefined do throw ("Unable to create or resolve managed child layer: " + layerName)
+        if childLayer.name != layerName do
+        (
+            local renamed = false
+            try
+            (
+                childLayer.name = layerName
+                renamed = (childLayer.name == layerName)
+            )
+            catch()
+            if not renamed do
+            (
+                try
+                (
+                    local temporaryName = layerName + "__FM_CASE_RENAME__"
+                    childLayer.name = temporaryName
+                    childLayer.name = layerName
+                    renamed = (childLayer.name == layerName)
+                )
+                catch()
+            )
+        )
+        local parentOk = false
+        try
+        (
+            local currentParent = childLayer.getParent()
+            if currentParent == managedLayer then
+                parentOk = true
+            else
+                parentOk = childLayer.setParent managedLayer
+        )
+        catch (parentOk = false)
+        if not parentOk do throw ("Unable to parent managed child layer under FM_MANAGED: " + layerName)
+        childLayer
+    ),
+
+    fn getManagedForestsLayer =
+    (
+        getOrCreateManagedChildLayer "FM_FORESTS"
+    ),
+
+    fn getManagedReferencesLayer =
+    (
+        getOrCreateManagedChildLayer "FM_REFERENCES"
+    ),
+
+    fn setLayerProtectionState layer frozenState lockedState visibleState =
+    (
+        if layer == undefined do return false
+        local frozenWriteOk = true
+        local lockWriteOk = true
+        local visibleWriteOk = true
+        try (layer.lock = false) catch()
+        try (layer.isFrozen = frozenState) catch (frozenWriteOk = false)
+        try (layer.on = visibleState) catch (visibleWriteOk = false)
+        try (layer.lock = lockedState) catch (lockWriteOk = false)
+        if not frozenWriteOk do throw ("Managed layer frozen state could not be changed: " + layer.name)
+        if not visibleWriteOk do throw ("Managed layer visibility could not be changed: " + layer.name)
+        if not lockWriteOk do throw ("Managed layer lock state could not be changed: " + layer.name)
+        if layer.isFrozen != frozenState do throw ("Managed layer frozen verification failed: " + layer.name)
+        if layer.lock != lockedState do throw ("Managed layer lock verification failed: " + layer.name)
+        if layer.on != visibleState do throw ("Managed layer visibility verification failed: " + layer.name)
+        true
+    ),
+
+    fn setManagedLayerProtected protectedState =
+    (
+        local managedLayer = getManagedLayer()
+        local forestsLayer = getManagedForestsLayer()
+        local referencesLayer = getManagedReferencesLayer()
+        if protectedState then
+        (
+            setLayerProtectionState forestsLayer true true true
+            setLayerProtectionState referencesLayer true true false
+            setLayerProtectionState managedLayer true true true
+        )
+        else
+        (
+            setLayerProtectionState managedLayer false false true
+            setLayerProtectionState forestsLayer false false true
+            setLayerProtectionState referencesLayer false false false
+        )
+        true
+    ),
+
+    fn isReservedManagedForestName nodeName =
+    (
+        local value = nodeName as string
+        if value == "FM_Forest_001" then return true
+        matchPattern value pattern:"FM_Layer_*" ignoreCase:false
+    ),
+
+    fn isForestNode node =
+    (
+        if node == undefined do return false
+        local result = false
+        try (result = isKindOf node ::Forest_Pro) catch (result = false)
+        result
+    ),
+
+    fn markManagedForestNode node role:"plant_group" =
+    (
+        if not (isForestNode node) do throw "Managed node is not a Forest Pack Forest object."
+        markForestManagerOwnedNode node role:role
+        try (setUserProp node "ForestManagerManagedVersion" "1") catch()
+        true
+    ),
+
+    fn moveNodeToManagedLayer node =
+    (
+        if node == undefined do return false
+        local targetLayer = undefined
+        if isForestNode node then
+            targetLayer = getManagedForestsLayer()
+        else
+            targetLayer = getManagedReferencesLayer()
+        local moved = false
+        try
+        (
+            targetLayer.addNode node
+            moved = true
+        )
+        catch()
+        if not moved do throw ("Unable to move managed node to " + targetLayer.name + ": " + node.name)
+        true
+    ),
+
+    fn migrateLegacyReferenceLayer =
+    (
+        local migrated = #()
+        local legacyLayer = LayerManager.getLayerFromName "FM_References"
+        if legacyLayer == undefined do return migrated
+        local targetLayer = getManagedReferencesLayer()
+        local legacyNodes = #()
+        try (legacyLayer.nodes &legacyNodes) catch()
+        for node in legacyNodes do
+        (
+            if node != undefined and isForestManagerOwnedNode node do
+            (
+                try
+                (
+                    targetLayer.addNode node
+                    append migrated node.name
+                )
+                catch()
+            )
+        )
+        try (legacyLayer.on = false) catch()
+        migrated
+    ),
+
+    fn adoptReservedManagedForests =
+    (
+        local adopted = #()
+        local alreadyOwned = #()
+        for node in objects do
+        (
+            if isForestNode node and isReservedManagedForestName node.name do
+            (
+                if isForestManagerOwnedNode node then
+                    append alreadyOwned node.name
+                else
+                (
+                    local role = if node.name == "FM_Forest_001" then "primary_forest" else "plant_group_runtime"
+                    markManagedForestNode node role:role
+                    append adopted node.name
+                )
+                moveNodeToManagedLayer node
+            )
+        )
+        #(adopted, alreadyOwned)
+    ),
+
+    fn protectAllManagedNodes =
+    (
+        setManagedLayerProtected false
+        local managedLayer = getManagedLayer()
+        local moved = #()
+        for node in objects do
+        (
+            if isForestManagerOwnedNode node do
+            (
+                moveNodeToManagedLayer node
+                append moved node.name
+            )
+        )
+        setManagedLayerProtected true
+        moved
+    ),
+
+    fn stringArrayJson values =
+    (
+        local result = "["
+        for i = 1 to values.count do
+        (
+            if i > 1 do result += ","
+            result += jsonString values[i]
+        )
+        result + "]"
+    ),
+
+    fn layerStateJson layer =
+    (
+        if layer == undefined do return "null"
+        local frozen = false
+        local locked = false
+        local visible = true
+        local parentName = ""
+        try (frozen = layer.isFrozen) catch()
+        try (locked = layer.lock) catch()
+        try (visible = layer.on) catch()
+        try
+        (
+            local parentLayer = layer.getParent()
+            if parentLayer != undefined do parentName = parentLayer.name
+        )
+        catch()
+        "{\"name\":" + jsonString layer.name +
+        ",\"parent\":" + jsonString parentName +
+        ",\"frozen\":" + boolJson frozen +
+        ",\"locked\":" + boolJson locked +
+        ",\"visible\":" + boolJson visible + "}"
+    ),
+
+    fn managedSceneStatusJson =
+    (
+        local managedLayer = getManagedLayer()
+        local forestsLayer = getManagedForestsLayer()
+        local referencesLayer = getManagedReferencesLayer()
+        local managedNames = #()
+        local managedForests = #()
+        local technicalForests = #()
+        local managedReferences = #()
+        local forestNodes = #()
+        local referenceNodes = #()
+        try (forestsLayer.nodes &forestNodes) catch()
+        try (referencesLayer.nodes &referenceNodes) catch()
+        for node in forestNodes do
+        (
+            if node != undefined do
+            (
+                append managedNames node.name
+                if isForestNode node do
+                (
+                    append managedForests node.name
+                    if matchPattern node.name pattern:"FM_Layer_*" ignoreCase:false do append technicalForests node.name
+                )
+            )
+        )
+        for node in referenceNodes do
+        (
+            if node != undefined do
+            (
+                append managedNames node.name
+                append managedReferences node.name
+            )
+        )
+        local frozen = false
+        local locked = false
+        try (frozen = managedLayer.isFrozen) catch()
+        try (locked = managedLayer.lock) catch()
+        "{\"layer_name\":\"FM_MANAGED\"" +
+        ",\"frozen\":" + boolJson frozen +
+        ",\"locked\":" + boolJson locked +
+        ",\"forests_layer\":" + layerStateJson forestsLayer +
+        ",\"references_layer\":" + layerStateJson referencesLayer +
+        ",\"managed_node_count\":" + (managedNames.count as string) +
+        ",\"managed_nodes\":" + stringArrayJson managedNames +
+        ",\"managed_forest_count\":" + (managedForests.count as string) +
+        ",\"managed_forests\":" + stringArrayJson managedForests +
+        ",\"technical_forest_count\":" + (technicalForests.count as string) +
+        ",\"technical_forests\":" + stringArrayJson technicalForests +
+        ",\"managed_reference_count\":" + (managedReferences.count as string) +
+        ",\"managed_references\":" + stringArrayJson managedReferences +
+        ",\"verified\":true}"
+    ),
+
+    fn ensureManagedSceneJson =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        setManagedLayerProtected false
+        local migratedReferences = migrateLegacyReferenceLayer()
+        local adoption = adoptReservedManagedForests()
+        local moved = protectAllManagedNodes()
+        "{\"layer_name\":\"FM_MANAGED\"" +
+        ",\"forests_layer\":\"FM_FORESTS\"" +
+        ",\"references_layer\":\"FM_REFERENCES\"" +
+        ",\"migrated_references\":" + stringArrayJson migratedReferences +
+        ",\"adopted\":" + stringArrayJson adoption[1] +
+        ",\"already_owned\":" + stringArrayJson adoption[2] +
+        ",\"protected\":" + stringArrayJson moved +
+        ",\"status\":" + managedSceneStatusJson() +
+        ",\"verified\":true}"
+    ),
+
+    fn createManagedForestJson forestName roleName =
+    (
+        if not (forestPackAvailable()) do throw "Forest Pack Pro class ::Forest_Pro is not available."
+        if forestName == undefined or forestName == "" do throw "Managed Forest name cannot be empty."
+        if not (matchPattern forestName pattern:"FM_*" ignoreCase:false) do throw "Managed Forest names must use the FM_ prefix."
+        local existing = getNodeByName forestName
+        if existing != undefined then
+        (
+            if not (isForestNode existing) do throw ("A non-Forest object already uses the requested name: " + forestName)
+            if not (isForestManagerOwnedNode existing) do throw ("Refusing to adopt non-reserved existing Forest: " + forestName)
+            setManagedLayerProtected false
+            moveNodeToManagedLayer existing
+            setManagedLayerProtected true
+            return "{\"forest_name\":" + jsonString existing.name + ",\"created\":false,\"verified\":true}"
+        )
+
+        setManagedLayerProtected false
+        local forestNode = undefined
+        try
+        (
+            forestNode = ::Forest_Pro()
+            forestNode.name = forestName
+            setForestPointCloudDisplay forestNode
+            markManagedForestNode forestNode role:roleName
+            moveNodeToManagedLayer forestNode
+            setManagedLayerProtected true
+            "{\"forest_name\":" + jsonString forestNode.name + ",\"created\":true,\"verified\":true}"
+        )
+        catch
+        (
+            local message = getCurrentException()
+            try (if forestNode != undefined do delete forestNode) catch()
+            try (setManagedLayerProtected true) catch()
+            reportBridgeError ("CREATE_MANAGED_FOREST: " + message)
+            throw()
+        )
+    ),
+
+    fn deleteManagedForestJson forestName =
+    (
+        local forestNode = getNodeByName forestName
+        if forestNode == undefined do return "{\"forest_name\":" + jsonString forestName + ",\"deleted\":false,\"missing\":true,\"verified\":true}"
+        if not (isForestNode forestNode) do throw ("Refusing to delete non-Forest object: " + forestName)
+        if forestName == "FM_Forest_001" do throw "FM_Forest_001 is the primary managed Forest and cannot be deleted by the generic delete endpoint."
+        if not (isForestManagerOwnedNode forestNode) do throw ("Refusing to delete Forest without Forest Manager ownership marker: " + forestName)
+        setManagedLayerProtected false
+        delete forestNode
+        setManagedLayerProtected true
+        local stillExists = getNodeByName forestName != undefined
+        if stillExists do throw ("Managed Forest delete verification failed: " + forestName)
+        "{\"forest_name\":" + jsonString forestName + ",\"deleted\":true,\"missing\":false,\"verified\":true}"
+    ),
+
+    fn plantGroupAreaArrayProperties =
+    (
+        #(
+            #aridlist, #pf_aractivelist, #arnamelist, #arnodelist, #arnodenamelist,
+            #artypelist, #arincexclist, #arresollist, #arslicelist, #arslicetoplist,
+            #arwidthlist, #arforceopenlist, #armaplist, #arscalelist, #arthresholdlist,
+            #arsurfidlist, #arflafdenslist, #arflafscalist, #arflinvlist, #arselspeclist,
+            #arspeclist, #arpaintlist, #arboundchecklist, #arprojectlist, #arshapelist,
+            #arobscalelist, #arlinkidlist, #arscalemin, #arscalemax, #arzoffset
+        )
+    ),
+
+    fn findPlantGroupAreaIndex forestNode groupKey =
+    (
+        if forestNode == undefined do return 0
+        if not (isProperty forestNode #arnamelist) do return 0
+        local expectedName = "FM_GROUP_" + groupKey
+        for i = 1 to forestNode.arnamelist.count do
+        (
+            local currentName = ""
+            try (currentName = forestNode.arnamelist[i] as string) catch (currentName = "")
+            if currentName == expectedName do return i
+        )
+        0
+    ),
+
+    fn appendPlantGroupAreaClone forestNode baseIndex groupKey =
+    (
+        if baseIndex < 1 do throw "Plant-group base Area index must be one or greater."
+        if not (isProperty forestNode #aridlist) do throw "Forest Pack property missing: aridlist."
+        local oldCount = forestNode.aridlist.count
+        if baseIndex > oldCount do throw "Plant-group base Area index is outside the Area list."
+        local newIndex = oldCount + 1
+        local props = plantGroupAreaArrayProperties()
+        for propName in props do
+        (
+            if isProperty forestNode propName do
+            (
+                local arr = getProperty forestNode propName
+                if (classOf arr == ArrayParameter or classOf arr == Array) do
+                (
+                    local beforeCount = arr.count
+                    if beforeCount == oldCount do
+                    (
+                        local baseValue = undefined
+                        try (baseValue = arr[baseIndex]) catch (baseValue = undefined)
+                        arr.count = newIndex
+                        try (arr[newIndex] = baseValue) catch()
+                    )
+                )
+            )
+        )
+        if forestNode.aridlist.count != newIndex do throw "Plant-group Area clone did not extend aridlist."
+        forestNode.aridlist[newIndex] = newIndex
+        if isProperty forestNode #arnamelist do forestNode.arnamelist[newIndex] = "FM_GROUP_" + groupKey
+        newIndex
+    ),
+
+    fn plantGroupGeometrySelectionCsv forestNode speciesCsv =
+    (
+        if forestNode == undefined do throw "Plant-group Forest target was not found."
+        if not (isProperty forestNode #cobjlist) do throw "Forest Pack property missing: cobjlist."
+        if not (isProperty forestNode #specidlist) do throw "Forest Pack property missing: specidlist."
+
+        local speciesTokens = filterString speciesCsv ","
+        if speciesTokens.count < 1 do throw "Plant-group species selection cannot be empty."
+
+        local selectionCsv = ""
+        for rawToken in speciesTokens do
+        (
+            local sourceToken = trimLeft (trimRight rawToken)
+            if sourceToken == "" do throw "Plant-group species selection contains an empty token."
+
+            local specId = 0
+            local parsedNumericId = 0
+            try (parsedNumericId = sourceToken as integer) catch (parsedNumericId = 0)
+
+            if parsedNumericId > 0 then
+            (
+                for geometryIndex = 1 to forestNode.specidlist.count while specId == 0 do
+                (
+                    local candidateId = 0
+                    try (candidateId = forestNode.specidlist[geometryIndex] as integer) catch (candidateId = 0)
+                    if candidateId == parsedNumericId do specId = candidateId
+                )
+                if specId == 0 do throw ("Plant-group Geometry spec ID was not found in the target Forest: " + sourceToken)
+            )
+            else
+            (
+                local geometryIndex = findGeometrySourceIndexByName forestNode sourceToken
+                if geometryIndex < 1 do throw ("Plant-group Geometry source was not found in the target Forest: " + sourceToken)
+                if geometryIndex > forestNode.specidlist.count do throw ("Plant-group Geometry spec ID is unavailable for source: " + sourceToken)
+                specId = forestNode.specidlist[geometryIndex] as integer
+                if specId < 1 do throw ("Plant-group Geometry spec ID is invalid for source: " + sourceToken)
+            )
+
+            if selectionCsv != "" do selectionCsv += ","
+            selectionCsv += (specId as string)
+        )
+        selectionCsv
+    ),
+
+    fn enablePlantGroupRandomizeStacked forestNode areaIndex =
+    (
+        if forestNode == undefined do return false
+        local enabled = false
+        local propNames = #()
+        try (propNames = getPropNames forestNode) catch (propNames = #())
+        for propName in propNames while not enabled do
+        (
+            local propText = toLower (propName as string)
+            if (findString propText "random") != undefined and (findString propText "stack") != undefined do
+            (
+                try
+                (
+                    local value = getProperty forestNode propName
+                    if isKindOf value Array then
+                    (
+                        if value.count < areaIndex do value.count = areaIndex
+                        value[areaIndex] = true
+                        setProperty forestNode propName value
+                    )
+                    else
+                    (
+                        if isKindOf value Boolean do setProperty forestNode propName true
+                    )
+                    enabled = true
+                )
+                catch()
+            )
+        )
+        enabled
+    ),
+
+    fn plantGroupMetadataKey groupKey =
+    (
+        "ForestManagerPlantGroupRuntime_" + groupKey
+    ),
+
+    fn removePlantGroupAreaAtIndex forestNode removeIndex =
+    (
+        if forestNode == undefined do return false
+        if not (isProperty forestNode #aridlist) do return false
+        local oldCount = forestNode.aridlist.count
+        if removeIndex < 1 or removeIndex > oldCount do return false
+        local props = plantGroupAreaArrayProperties()
+        for propName in props do
+        (
+            if isProperty forestNode propName do
+            (
+                local arr = getProperty forestNode propName
+                if (classOf arr == ArrayParameter or classOf arr == Array) and arr.count == oldCount do
+                (
+                    for i = removeIndex to (oldCount - 1) do
+                    (
+                        try (arr[i] = arr[i + 1]) catch()
+                    )
+                    try (arr.count = oldCount - 1) catch()
+                )
+            )
+        )
+        forestNode.aridlist.count == (oldCount - 1)
+    ),
+
+    fn cleanupManagedPlantGroupAreas forestNode =
+    (
+        if forestNode == undefined do return 0
+        if not (isProperty forestNode #arnamelist) do return 0
+        local removed = 0
+        for i = forestNode.arnamelist.count to 1 by -1 do
+        (
+            local currentName = ""
+            try (currentName = forestNode.arnamelist[i] as string) catch (currentName = "")
+            if matchPattern currentName pattern:"FM_GROUP_*" ignoreCase:true do
+            (
+                if removePlantGroupAreaAtIndex forestNode i do removed += 1
+            )
+        )
+        removed
+    ),
+
+    fn plantGroupAreaUpsertJson forestName groupKey baseZeroIndex speciesCsv scalePercent =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Plant-group Forest target was not found."
+        if not (isProperty forestNode #aridlist) do throw "Forest Pack property missing: aridlist."
+        if scalePercent <= 0.0 do throw "Plant-group distribution scale must be greater than zero."
+        if speciesCsv == "" do throw "Plant-group species selection cannot be empty."
+
+        local baseIndex = baseZeroIndex + 1
+        if baseIndex < 1 or baseIndex > forestNode.aridlist.count do throw "Plant-group base Area index is out of range."
+
+        -- Validate the requested species against the real Geometry List, but do not
+        -- create another Forest Pack Area. Plant Groups are Forest Manager semantic
+        -- controls, not duplicate spline areas.
+        local geometrySelectionCsv = plantGroupGeometrySelectionCsv forestNode speciesCsv
+        local metadataValue = geometrySelectionCsv + "|" + (scalePercent as string)
+        local metadataKey = plantGroupMetadataKey groupKey
+        setUserProp forestNode metadataKey metadataValue
+        local readback = undefined
+        try (readback = getUserProp forestNode metadataKey) catch (readback = undefined)
+        if readback != metadataValue do throw "Plant-group runtime metadata verification failed."
+
+        try (notifyDependents forestNode partID:#all message:#change) catch()
+
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"group_key\":" + (jsonString groupKey) +
+        ",\"area_index\":" + (baseZeroIndex as string) +
+        ",\"base_area_index\":" + (baseZeroIndex as string) +
+        ",\"species\":" + (jsonString speciesCsv) +
+        ",\"geometry_selection\":" + (jsonString geometrySelectionCsv) +
+        ",\"scale_percent\":" + (scalePercent as string) +
+        ",\"created\":false" +
+        ",\"managed_area_created\":false" +
+        ",\"verified\":true}"
+    ),
+
+    fn plantGroupSpeciesIdsFromSelection selectionCsv =
+    (
+        local ids = #()
+        local tokens = filterString selectionCsv " ,;"
+        for token in tokens do
+        (
+            local value = 0
+            try (value = token as integer) catch (value = 0)
+            if value > 0 and (findItem ids value) == 0 do append ids value
+        )
+        ids
+    ),
+
+    fn plantGroupSpeciesSelectionString speciesIds =
+    (
+        local result = ""
+        for value in speciesIds do result += (" " + (value as string))
+        result
+    ),
+
+    fn applyPlantGroupMetadataProbabilities forestNode groupKeys =
+    (
+        if forestNode == undefined do return #()
+        if not (isProperty forestNode #specidlist) do throw "Forest Pack property missing: specidlist."
+        if not (isProperty forestNode #problist) do throw "Forest Pack property missing: problist."
+
+        local specIds = #()
+        local weights = #()
+        for groupKey in groupKeys do
+        (
+            local metadataKey = plantGroupMetadataKey groupKey
+            local metadataValue = undefined
+            try (metadataValue = getUserProp forestNode metadataKey) catch (metadataValue = undefined)
+            if metadataValue == undefined or metadataValue == "" do
+                throw ("Plant-group runtime metadata was not found: " + groupKey)
+            local parts = filterString metadataValue "|"
+            if parts.count != 2 do throw ("Plant-group runtime metadata is invalid: " + groupKey)
+            local ids = plantGroupSpeciesIdsFromSelection parts[1]
+            if ids.count < 1 do throw ("Plant-group runtime metadata has no species: " + groupKey)
+            local scalePercent = 0.0
+            try (scalePercent = parts[2] as float) catch (scalePercent = 0.0)
+            if scalePercent <= 0.0 do throw ("Plant-group runtime scale is invalid: " + groupKey)
+            local groupWeight = 1.0 / (scalePercent * scalePercent)
+            local perSpeciesWeight = groupWeight / ids.count
+            for specId in ids do
+            (
+                local pos = findItem specIds specId
+                if pos == 0 then
+                (
+                    append specIds specId
+                    append weights perSpeciesWeight
+                )
+                else
+                    weights[pos] += perSpeciesWeight
+            )
+        )
+
+        local totalWeight = 0.0
+        for value in weights do totalWeight += value
+        if totalWeight <= 0.0 do throw "Plant-group probability total is zero."
+
+        local geometryCount = forestNode.specidlist.count
+        forestNode.problist.count = geometryCount
+        if isProperty forestNode #old_problist do forestNode.old_problist.count = geometryCount
+        for geometryIndex = 1 to geometryCount do
+        (
+            local specId = 0
+            try (specId = forestNode.specidlist[geometryIndex] as integer) catch (specId = 0)
+            local pos = findItem specIds specId
+            local probability = if pos > 0 then (weights[pos] / totalWeight) * 100.0 else 0.0
+            forestNode.problist[geometryIndex] = probability
+            if isProperty forestNode #old_problist do forestNode.old_problist[geometryIndex] = (probability as integer)
+        )
+        specIds
+    ),
+
+    fn refreshPlantGroupGeometryBindings forestNode speciesIds =
+    (
+        if forestNode == undefined do throw "Plant-group Geometry refresh target is undefined."
+        if not (isProperty forestNode #cobjlist) do throw "Forest Pack property missing: cobjlist."
+        if not (isProperty forestNode #geomlist) do throw "Forest Pack property missing: geomlist."
+        if not (isProperty forestNode #specidlist) do throw "Forest Pack property missing: specidlist."
+
+        local refreshedIds = #()
+        for geometryIndex = 1 to forestNode.cobjlist.count do
+        (
+            local sourceNode = undefined
+            local specId = 0
+            try (sourceNode = forestNode.cobjlist[geometryIndex]) catch (sourceNode = undefined)
+            try (specId = forestNode.specidlist[geometryIndex] as integer) catch (specId = 0)
+
+            if sourceNode != undefined and (findItem speciesIds specId) > 0 do
+            (
+                -- The legacy multi-Forest path always had one live Custom Object
+                -- binding per Forest. Recreate that same binding contract for every
+                -- selected species inside the consolidated Forest so Forest Pack
+                -- rebuilds its internal Geometry cache instead of retaining only the
+                -- original first item.
+                forestNode.cobjlist[geometryIndex] = undefined
+                forestNode.cobjlist[geometryIndex] = sourceNode
+                forestNode.geomlist[geometryIndex] = 2
+                if isProperty forestNode #nongeomlist and forestNode.nongeomlist.count >= geometryIndex do
+                    forestNode.nongeomlist[geometryIndex] = false
+                append refreshedIds specId
+            )
+        )
+
+        for specId in speciesIds do
+        (
+            if (findItem refreshedIds specId) == 0 do
+                throw ("Plant-group Geometry binding was not found for species ID: " + (specId as string))
+        )
+
+        if isProperty forestNode #disabled do forestNode.disabled = false
+        if isProperty forestNode #manualupdate do forestNode.manualupdate = false
+        try (notifyDependents forestNode partID:#all message:#change) catch()
+        try (forestNode.update()) catch()
+        try (redrawViews()) catch()
+        completeRedraw()
+
+        refreshedIds.count
+    ),
+
+    fn plantGroupGeneratedGeomIdSummary forestNode expectedSpeciesIds =
+    (
+        if forestNode == undefined do throw "Plant-group generated Geometry summary target is undefined."
+        local itemCount = getForestGeneratedItemCount forestNode
+        if itemCount < 0 do throw "Forest Pack generated item collection is unavailable."
+
+        local counts = #()
+        for specId in expectedSpeciesIds do append counts 0
+
+        for itemIndex = 0 to (itemCount - 1) do
+        (
+            local geomId = 0
+            try (geomId = forestNode.trees.getGeomID itemIndex) catch (geomId = 0)
+            local pos = findItem expectedSpeciesIds geomId
+            if pos > 0 do counts[pos] += 1
+        )
+
+        local json = "["
+        for i = 1 to expectedSpeciesIds.count do
+        (
+            if i > 1 do json += ","
+            json += "{\"species_id\":" + (expectedSpeciesIds[i] as string) +
+                    ",\"generated_items\":" + (counts[i] as string) + "}"
+        )
+        json += "]"
+        #(json, counts)
+    ),
+
+    fn plantGroupAreaFinalizeJson forestName baseIndicesCsv groupKeysCsv =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Plant-group Forest target was not found."
+        if not (isProperty forestNode #pf_aractivelist) do throw "Forest Pack property missing: pf_aractivelist."
+        if not (isProperty forestNode #arselspeclist) do throw "Forest Pack property missing: arselspeclist."
+        if not (isProperty forestNode #arspeclist) do throw "Forest Pack property missing: arspeclist."
+
+        local baseTokens = filterString baseIndicesCsv ","
+        local groupTokens = filterString groupKeysCsv ","
+        if groupTokens.count < 1 do throw "Plant-group finalize has no groups."
+
+        -- Remove every managed Area created by the older Stage 7.18 implementation.
+        -- Only the user's real/base spline Area remains in Forest Pack.
+        local removedManagedAreas = cleanupManagedPlantGroupAreas forestNode
+
+        local allSpeciesIds = applyPlantGroupMetadataProbabilities forestNode groupTokens
+        if allSpeciesIds.count < 1 do throw "Plant-group finalize found no Geometry species."
+        local refreshedGeometryCount = refreshPlantGroupGeometryBindings forestNode allSpeciesIds
+        if refreshedGeometryCount != allSpeciesIds.count do throw "Plant-group Geometry refresh count mismatch."
+        local combinedSpecies = plantGroupSpeciesSelectionString allSpeciesIds
+
+        -- Keep only the requested real base Areas active. Do not manufacture one Area
+        -- per semantic Plant Group.
+        local requestedBaseIndices = #()
+        for token in baseTokens do
+        (
+            local zeroIndex = 0
+            try (zeroIndex = token as integer) catch (zeroIndex = -1)
+            local maxIndex = zeroIndex + 1
+            if maxIndex >= 1 and maxIndex <= forestNode.pf_aractivelist.count and (findItem requestedBaseIndices maxIndex) == 0 do
+                append requestedBaseIndices maxIndex
+        )
+        if requestedBaseIndices.count < 1 do throw "Plant-group finalize did not resolve a real base Area."
+
+        for i = 1 to forestNode.pf_aractivelist.count do
+        (
+            local areaName = ""
+            try (areaName = forestNode.arnamelist[i] as string) catch (areaName = "")
+            if matchPattern areaName pattern:"FM_GROUP_*" ignoreCase:true then
+                forestNode.pf_aractivelist[i] = false
+            else if (findItem requestedBaseIndices i) > 0 then
+                forestNode.pf_aractivelist[i] = true
+        )
+
+        for maxIndex in requestedBaseIndices do
+        (
+            forestNode.arselspeclist[maxIndex] = true
+            forestNode.arspeclist[maxIndex] = combinedSpecies
+            if forestNode.pf_aractivelist[maxIndex] != true do throw "Plant-group base Area activation failed."
+            if (forestNode.arspeclist[maxIndex] as string) != combinedSpecies do throw "Plant-group base species verification failed."
+        )
+
+        -- Hard acceptance guard: no FM_GROUP Area may survive cleanup.
+        local remainingManagedAreas = 0
+        for i = 1 to forestNode.arnamelist.count do
+        (
+            local currentName = ""
+            try (currentName = forestNode.arnamelist[i] as string) catch (currentName = "")
+            if matchPattern currentName pattern:"FM_GROUP_*" ignoreCase:true do remainingManagedAreas += 1
+        )
+        if remainingManagedAreas != 0 do throw "Managed Plant Group Areas remain after cleanup."
+
+        -- A consolidated Forest with multiple Geometry species must use Random
+        -- diversity here. The legacy scene was intentionally left in Clusters
+        -- mode (divers=2), which was harmless when each Forest contained only one
+        -- species but can make a single consolidated Forest choose one huge
+        -- species cluster across the entire planting area. Random mode (divers=0)
+        -- is Forest Pack's default probability-driven Geometry selection mode.
+        local diversityBefore = if isProperty forestNode #divers then forestNode.divers else -1
+        if isProperty forestNode #divers do forestNode.divers = 0
+        if isProperty forestNode #divers and forestNode.divers != 0 do throw "Plant-group diversity could not be switched to Random mode."
+
+        if isProperty forestNode #disabled do forestNode.disabled = false
+        if isProperty forestNode #manualupdate do forestNode.manualupdate = false
+        try (notifyDependents forestNode partID:#all message:#change) catch()
+        try (forestNode.update()) catch()
+        completeRedraw()
+
+        -- Acceptance is based on Forest Pack's generated items, not only on the
+        -- writable parameter arrays. getGeomID is the actual Geometry ID used by
+        -- each generated Forest item. Every requested species must occur at least
+        -- once or this finalize fails.
+        local generatedSummary = plantGroupGeneratedGeomIdSummary forestNode allSpeciesIds
+        local generatedGeomJson = generatedSummary[1]
+        local generatedGeomCounts = generatedSummary[2]
+        -- Generated-item coverage is diagnostic here. The final Diversity Map
+        -- is bound after finalize, and small planting areas can legitimately
+        -- contain fewer generated items than the number of configured species.
+        -- Structural validity is verified above; strict species coverage belongs
+        -- to the explicit post-bind acceptance path.
+
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"distribution_mode\":\"single_real_area_geometry_species\"" +
+        ",\"diversity_before\":" + (diversityBefore as string) +
+        ",\"diversity_mode\":\"random\"" +
+        ",\"diversity_value\":" + ((if isProperty forestNode #divers then forestNode.divers else -1) as string) +
+        ",\"generated_geometry_ids\":" + generatedGeomJson +
+        ",\"removed_managed_area_count\":" + (removedManagedAreas as string) +
+        ",\"remaining_managed_area_count\":0" +
+        ",\"active_group_area_count\":0" +
+        ",\"active_base_area_count\":" + (requestedBaseIndices.count as string) +
+        ",\"species_selection\":" + (jsonString combinedSpecies) +
+        ",\"species_count\":" + (allSpeciesIds.count as string) +
+        ",\"refreshed_geometry_count\":" + (refreshedGeometryCount as string) +
+        ",\"area_count\":" + (forestNode.aridlist.count as string) +
+        ",\"generated_items\":" + (getForestGeneratedItemCount forestNode as string) +
+        ",\"verified\":true}"
+    ),
+
+
+    fn plantGroupBindSingleForestDiversityMapJson forestName encodedMapPath strictVerify =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Single-Forest diversity-map target was not found."
+        if not (isProperty forestNode #distmap) do throw "Forest Pack property missing: distmap."
+        if not (isProperty forestNode #densityMap) do throw "Forest Pack property missing: densityMap."
+        if not (isProperty forestNode #distmode) do throw "Forest Pack property missing: distmode."
+        if not (isProperty forestNode #divers) do throw "Forest Pack property missing: divers."
+        if not (isProperty forestNode #coloridlist) do throw "Forest Pack property missing: coloridlist."
+        if forestNode.coloridlist.count < 3 do throw "Single-Forest diversity map requires at least three Geometry items."
+
+        local mapPath = decodeBase64Utf8 encodedMapPath
+        if mapPath == "" do throw "Single-Forest diversity map path is empty."
+        if not (doesFileExist mapPath) do throw ("Single-Forest diversity map file was not found: " + mapPath)
+
+        local bitmapMap = Bitmaptexture filename:mapPath
+        if bitmapMap == undefined do throw "Could not create the Single-Forest diversity Bitmaptexture."
+        local coords = undefined
+        try (coords = bitmapMap.coords) catch (coords = undefined)
+        if coords == undefined do throw "Single-Forest diversity Bitmaptexture coords are unavailable."
+        normalizeSpeciesDensityMapCoords coords
+        -- Keep colour-ID sampling available across translated/small Areas.
+        -- The tile physical size is still controlled by units_x/units_y.
+        coords.U_Tile = true
+        coords.V_Tile = true
+
+        local splineNode = findForestAreaSpline forestNode
+        if splineNode == undefined do throw "Single-Forest diversity map area spline was not found."
+        local bb = nodeGetBoundingBox splineNode splineNode.transform
+        local pmin = bb[1]
+        local pmax = bb[2]
+        local mapWidth = abs(pmax.x - pmin.x)
+        local mapHeight = abs(pmax.y - pmin.y)
+        if mapWidth <= 0.0 or mapHeight <= 0.0 do throw "Single-Forest diversity map area bounds are invalid."
+        forestNode.units_x = mapWidth
+        forestNode.units_y = mapHeight
+        forestNode.offset_X = (pmin.x + pmax.x) * 0.5
+        forestNode.offset_Y = (pmin.y + pmax.y) * 0.5
+
+        forestNode.distmode = 0
+        forestNode.distmap = bitmapMap
+        -- This RGB map selects Geometry by Color ID.  Do not also reinterpret
+        -- colour luminance as a grayscale density signal.
+        forestNode.densityMap = true
+
+        -- Forest Pack Image Mode Diversity: 0=Random, 1=Match Color ID on Map,
+        -- 2=Clusters. One RGB map now carries the three legacy grayscale species
+        -- masks as R/G/B channels and selects the matching Geometry item directly.
+        forestNode.divers = 1
+        if isProperty forestNode #divmapnoise do forestNode.divmapnoise = 0.0
+        forestNode.coloridlist[1] = color 255 0 0
+        forestNode.coloridlist[2] = color 0 255 0
+        forestNode.coloridlist[3] = color 0 0 255
+
+        if isProperty forestNode #disabled do forestNode.disabled = false
+        if isProperty forestNode #manualupdate do forestNode.manualupdate = false
+        try (notifyDependents forestNode partID:#all message:#change) catch()
+        try (forestNode.update()) catch()
+        completeRedraw()
+
+        if forestNode.distmap == undefined do throw "Single-Forest diversity map assignment returned undefined."
+        local assignedFile = ""
+        try (assignedFile = forestNode.distmap.filename) catch (assignedFile = "")
+        if toLower assignedFile != toLower mapPath do throw "Single-Forest diversity map filename verification failed."
+        if forestNode.densityMap != true do throw "Single-Forest densityMap mode is not enabled."
+        if forestNode.distmode != 0 do throw "Single-Forest distribution mode is not Image mode."
+        if forestNode.divers != 1 do throw "Single-Forest diversity mode is not Match Color ID on Map."
+
+        local generatedGeomJson = "[]"
+        if strictVerify do
+        (
+            local speciesIds = #()
+            if isProperty forestNode #specidlist do
+            (
+                for i = 1 to forestNode.specidlist.count do append speciesIds forestNode.specidlist[i]
+            )
+            if speciesIds.count < 3 do throw "Single-Forest diversity-map verification found fewer than three species IDs."
+            local generatedSummary = plantGroupGeneratedGeomIdSummary forestNode speciesIds
+            generatedGeomJson = generatedSummary[1]
+            local generatedGeomCounts = generatedSummary[2]
+            local generatedTotal = 0
+            for countValue in generatedGeomCounts do generatedTotal += countValue
+            local minimumCoverageSample = amax 12 (speciesIds.count * 3)
+            if generatedTotal >= minimumCoverageSample do
+            (
+                for i = 1 to generatedGeomCounts.count do
+                (
+                    if generatedGeomCounts[i] < 1 do
+                        throw ("Single-Forest diversity map generated no items for species ID: " + (speciesIds[i] as string))
+                )
+            )
+        )
+
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"map_path\":" + (jsonString assignedFile) +
+        ",\"distmode\":" + (forestNode.distmode as string) +
+        ",\"densityMap\":" + (boolJson forestNode.densityMap) +
+        ",\"map_u_tile\":" + (boolJson coords.U_Tile) +
+        ",\"map_v_tile\":" + (boolJson coords.V_Tile) +
+        ",\"diversity_mode\":\"match_color_id_on_map\"" +
+        ",\"diversity_value\":" + (forestNode.divers as string) +
+        ",\"strict_verify\":" + (boolJson strictVerify) +
+        ",\"generated_geometry_ids\":" + generatedGeomJson +
+        ",\"color_ids\":[\"255,100,0\",\"0,179,0\",\"180,100,255\"]" +
+        ",\"map_units_x\":" + (forestNode.units_x as string) +
+        ",\"map_units_y\":" + (forestNode.units_y as string) +
+        ",\"map_offset_x\":" + (forestNode.offset_X as string) +
+        ",\"map_offset_y\":" + (forestNode.offset_Y as string) +
+        ",\"verified\":true}"
+    ),
+
+    fn singleForestAreaBoundsJson forestName =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Single-Forest area-bounds target was not found."
+        local splineNode = findForestAreaSpline forestNode
+        if splineNode == undefined do throw "Single-Forest area spline was not found."
+        local bb = nodeGetBoundingBox splineNode splineNode.transform
+        local pmin = bb[1]
+        local pmax = bb[2]
+        local widthValue = abs(pmax.x - pmin.x)
+        local heightValue = abs(pmax.y - pmin.y)
+        if widthValue <= 0.0 or heightValue <= 0.0 do throw "Single-Forest area bounds are invalid."
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"spline_name\":" + (jsonString splineNode.name) +
+        ",\"width_system\":" + (widthValue as string) +
+        ",\"height_system\":" + (heightValue as string) +
+        ",\"center_x_system\":" + (((pmin.x + pmax.x) * 0.5) as string) +
+        ",\"center_y_system\":" + (((pmin.y + pmax.y) * 0.5) as string) +
+        ",\"current_units_x\":" + ((if isProperty forestNode #units_x then forestNode.units_x else 0.0) as string) +
+        ",\"current_units_y\":" + ((if isProperty forestNode #units_y then forestNode.units_y else 0.0) as string) +
+        ",\"verified\":true}"
+    ),
+
+    fn singleForestDistributionDiagnosticsJson forestName =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Single-Forest diagnostics target was not found."
+        if not (isProperty forestNode #specidlist) do throw "Forest Pack property missing: specidlist."
+        if not (isProperty forestNode #geomlist) do throw "Forest Pack property missing: geomlist."
+
+        local speciesIds = #()
+        for i = 1 to forestNode.specidlist.count do append speciesIds (forestNode.specidlist[i] as integer)
+        local generatedSummary = plantGroupGeneratedGeomIdSummary forestNode speciesIds
+        local generatedGeomJson = generatedSummary[1]
+        local generatedGeomCounts = generatedSummary[2]
+
+        local missingJson = "["
+        local missingCount = 0
+        for i = 1 to speciesIds.count do
+        (
+            if generatedGeomCounts[i] < 1 do
+            (
+                if missingCount > 0 do missingJson += ","
+                missingJson += (speciesIds[i] as string)
+                missingCount += 1
+            )
+        )
+        missingJson += "]"
+
+        local geomJson = "["
+        local radiusJson = "["
+        local scaleJson = "["
+        local probJson = "["
+        for i = 1 to forestNode.specidlist.count do
+        (
+            if i > 1 do
+            (
+                geomJson += ","
+                radiusJson += ","
+                scaleJson += ","
+                probJson += ","
+            )
+            geomJson += ((if isProperty forestNode #geomlist and forestNode.geomlist.count >= i then forestNode.geomlist[i] else 0) as string)
+            radiusJson += ((if isProperty forestNode #radiuslist and forestNode.radiuslist.count >= i then forestNode.radiuslist[i] else 0) as string)
+            scaleJson += ((if isProperty forestNode #ScaleList and forestNode.ScaleList.count >= i then forestNode.ScaleList[i] else 0.0) as string)
+            probJson += ((if isProperty forestNode #problist and forestNode.problist.count >= i then forestNode.problist[i] else 0.0) as string)
+        )
+        geomJson += "]"
+        radiusJson += "]"
+        scaleJson += "]"
+        probJson += "]"
+
+        local assignedFile = ""
+        if isProperty forestNode #distmap and forestNode.distmap != undefined do
+            try (assignedFile = forestNode.distmap.filename) catch (assignedFile = "")
+
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"geometry_count\":" + (forestNode.specidlist.count as string) +
+        ",\"generated_items\":" + (getForestGeneratedItemCount forestNode as string) +
+        ",\"generated_geometry_ids\":" + generatedGeomJson +
+        ",\"missing_species_ids\":" + missingJson +
+        ",\"missing_species_count\":" + (missingCount as string) +
+        ",\"geomlist\":" + geomJson +
+        ",\"radiuslist\":" + radiusJson +
+        ",\"scale_list\":" + scaleJson +
+        ",\"probability_list\":" + probJson +
+        ",\"units_x\":" + ((if isProperty forestNode #units_x then forestNode.units_x else 0.0) as string) +
+        ",\"units_y\":" + ((if isProperty forestNode #units_y then forestNode.units_y else 0.0) as string) +
+        ",\"distmode\":" + ((if isProperty forestNode #distmode then forestNode.distmode else -1) as string) +
+        ",\"densityMap\":" + (boolJson (if isProperty forestNode #densityMap then forestNode.densityMap else false)) +
+        ",\"diversity_value\":" + ((if isProperty forestNode #divers then forestNode.divers else -1) as string) +
+        ",\"map_path\":" + (jsonString assignedFile) +
+        ",\"verified\":true}"
+    ),
+
+
+    fn plantGroupSpeciesFastApplyJson forestName speciesCsv enabledToken scaleToken probabilityToken =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Plant-group species target Forest was not found."
+        if not (isProperty forestNode #specidlist) do throw "Forest Pack property missing: specidlist."
+        if not (isProperty forestNode #geomlist) do throw "Forest Pack property missing: geomlist."
+        if not (isProperty forestNode #ScaleList) do throw "Forest Pack property missing: ScaleList."
+        if not (isProperty forestNode #problist) do throw "Forest Pack property missing: problist."
+        if not (isProperty forestNode #cobjlist) do throw "Forest Pack property missing: cobjlist."
+
+        local tokens = filterString speciesCsv ","
+        if tokens.count < 1 do throw "Plant-group species list is empty."
+        local ids = #()
+        for token in tokens do append ids (token as integer)
+        local setEnabled = enabledToken != "-"
+        local setScale = scaleToken != "-"
+        local setProbability = probabilityToken != "-"
+        local enabledValue = if setEnabled then ((enabledToken as integer) != 0) else true
+        local scaleValue = if setScale then (scaleToken as float) else 100.0
+        local probabilityValue = if setProbability then (probabilityToken as float) else 0.0
+        if setScale and scaleValue <= 0.0 do throw "Plant-group species scale must be greater than zero."
+        if setProbability and (probabilityValue < 0.0 or probabilityValue > 100.0) do throw "Plant-group species probability must be 0..100."
+
+        local touched = 0
+        for i = 1 to forestNode.specidlist.count do
+        (
+            local specId = forestNode.specidlist[i] as integer
+            if (findItem ids specId) > 0 do
+            (
+                local sourceNode = undefined
+                try (sourceNode = forestNode.cobjlist[i]) catch (sourceNode = undefined)
+                if setScale and sourceNode != undefined do
+                (
+                    -- Species Size is a real source-object scale, not the old Area/map scale.
+                    -- Preserve the FM-managed proxy's original transform once, then always
+                    -- derive the requested percentage from that immutable baseline.
+                    local baseXText = getUserProp sourceNode "FM_BaseScaleX"
+                    local baseYText = getUserProp sourceNode "FM_BaseScaleY"
+                    local baseZText = getUserProp sourceNode "FM_BaseScaleZ"
+                    if baseXText == undefined or baseXText == "" or baseYText == undefined or baseYText == "" or baseZText == undefined or baseZText == "" do
+                    (
+                        baseXText = sourceNode.scale.x as string
+                        baseYText = sourceNode.scale.y as string
+                        baseZText = sourceNode.scale.z as string
+                        setUserProp sourceNode "FM_BaseScaleX" baseXText
+                        setUserProp sourceNode "FM_BaseScaleY" baseYText
+                        setUserProp sourceNode "FM_BaseScaleZ" baseZText
+                    )
+                    local sizeFactor = scaleValue / 100.0
+                    local targetScale = [(baseXText as float) * sizeFactor, (baseYText as float) * sizeFactor, (baseZText as float) * sizeFactor]
+                    sourceNode.scale = targetScale
+                    setUserProp sourceNode "FM_SpeciesScalePercent" (scaleValue as string)
+                    -- Keep Forest's own per-item scale neutral to avoid double scaling.
+                    forestNode.ScaleList[i] = 100.0
+                    -- Rebind the Custom Object so Forest invalidates cached proxy geometry.
+                    forestNode.cobjlist[i] = undefined
+                    forestNode.cobjlist[i] = sourceNode
+                    local appliedScale = sourceNode.scale
+                    if (abs (appliedScale.x - targetScale.x)) > 0.0001 or (abs (appliedScale.y - targetScale.y)) > 0.0001 or (abs (appliedScale.z - targetScale.z)) > 0.0001 do
+                        throw "Plant-group species source scale verification failed."
+                )
+                if setEnabled do forestNode.geomlist[i] = (if enabledValue then 2 else 0)
+                if setProbability do
+                (
+                    forestNode.problist[i] = probabilityValue
+                    if isProperty forestNode #old_problist and forestNode.old_problist.count >= i do
+                        forestNode.old_problist[i] = (probabilityValue as integer)
+                )
+                touched += 1
+            )
+        )
+        if touched != ids.count do throw "Plant-group species fast apply did not resolve every species ID."
+
+        if isProperty forestNode #disabled do forestNode.disabled = false
+        if isProperty forestNode #manualupdate do forestNode.manualupdate = false
+        try (notifyDependents forestNode partID:#all message:#change) catch()
+        try (forestNode.update()) catch()
+        completeRedraw()
+
+        local scalesJson = "["
+        local enabledJson = "["
+        local probabilityJson = "["
+        local first = true
+        for i = 1 to forestNode.specidlist.count do
+        (
+            local specId = forestNode.specidlist[i] as integer
+            if (findItem ids specId) > 0 do
+            (
+                if not first do
+                (
+                    scalesJson += ","
+                    enabledJson += ","
+                    probabilityJson += ","
+                )
+                local effectiveScaleValue = forestNode.ScaleList[i]
+                local scaleSourceNode = undefined
+                try (scaleSourceNode = forestNode.cobjlist[i]) catch (scaleSourceNode = undefined)
+                if scaleSourceNode != undefined do
+                (
+                    local storedScaleText = getUserProp scaleSourceNode "FM_SpeciesScalePercent"
+                    if storedScaleText != undefined and storedScaleText != "" do effectiveScaleValue = storedScaleText as float
+                )
+                scalesJson += (effectiveScaleValue as string)
+                enabledJson += (boolJson (forestNode.geomlist[i] != 0))
+                probabilityJson += (forestNode.problist[i] as string)
+                first = false
+            )
+        )
+        scalesJson += "]"
+        enabledJson += "]"
+        probabilityJson += "]"
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"species_ids\":" + (jsonString speciesCsv) +
+        ",\"touched\":" + (touched as string) +
+        ",\"enabled\":" + enabledJson +
+        ",\"scale_percent\":" + scalesJson +
+        ",\"probability_percent\":" + probabilityJson +
+        ",\"generated_items\":" + (getForestGeneratedItemCount forestNode as string) +
+        ",\"verified\":true}"
+    ),
+
+    fn plantGroupManifestGetJson =
+    (
+        local forestNode = getNodeByName "FM_Forest_001"
+        if forestNode == undefined do throw "FM_Forest_001 is required for plant-group manifest storage."
+        if not (isForestNode forestNode) do throw "FM_Forest_001 is not a Forest Pack Forest object."
+        local manifestText = undefined
+        try (manifestText = getUserProp forestNode "ForestManagerPlantGroupManifest") catch (manifestText = undefined)
+        if manifestText == undefined or manifestText == "" then
+            "{\"manifest\":null,\"verified\":true}"
+        else
+            "{\"manifest\":" + manifestText + ",\"verified\":true}"
+    ),
+
+    fn plantGroupManifestSetJson manifestText =
+    (
+        local forestNode = getNodeByName "FM_Forest_001"
+        if forestNode == undefined do throw "FM_Forest_001 is required for plant-group manifest storage."
+        if not (isForestNode forestNode) do throw "FM_Forest_001 is not a Forest Pack Forest object."
+        local clean = trimLeft (trimRight manifestText)
+        if clean.count < 2 or (substring clean 1 1) != "{" do throw "Plant-group manifest must be a JSON object."
+        setUserProp forestNode "ForestManagerPlantGroupManifest" clean
+        local readback = undefined
+        try (readback = getUserProp forestNode "ForestManagerPlantGroupManifest") catch (readback = undefined)
+        if readback != clean do throw "Plant-group manifest write verification failed."
+        "{\"manifest\":" + clean + ",\"verified\":true}"
+    ),
+
     fn handleCommand rawCommand =
     (
         local cleanCommand = trimLeft (trimRight rawCommand)
@@ -6901,6 +8267,224 @@ struct ForestManagerBridgeState
             )
         )
 
+
+        if matchPattern command pattern:"FM_PLANT_GROUP_AREA_UPSERT|*" ignoreCase:true then
+        (
+            try
+            (
+                -- Parse the original command. Base64 tokens are case-sensitive and
+                -- must never be read from the uppercase routing copy.
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FM_PLANT_GROUP_AREA_UPSERT requires forest, group key, base Area index, species and scale."
+                local forestName = decodeBase64Utf8 parts[2]
+                local groupKey = decodeBase64Utf8 parts[3]
+                local baseZeroIndex = parts[4] as integer
+                local speciesCsv = decodeBase64Utf8 parts[5]
+                local scalePercent = parts[6] as float
+                return "{\"ok\":true,\"command\":\"FM_PLANT_GROUP_AREA_UPSERT\",\"data\":" + plantGroupAreaUpsertJson forestName groupKey baseZeroIndex speciesCsv scalePercent + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_PLANT_GROUP_AREA_UPSERT" (getCurrentException())
+            )
+        )
+
+
+
+        if matchPattern command pattern:"FM_SINGLE_FOREST_AREA_BOUNDS|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 2 do throw "FM_SINGLE_FOREST_AREA_BOUNDS requires forest name."
+                local forestName = decodeBase64Utf8 parts[2]
+                return "{\"ok\":true,\"command\":\"FM_SINGLE_FOREST_AREA_BOUNDS\",\"data\":" + singleForestAreaBoundsJson forestName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_SINGLE_FOREST_AREA_BOUNDS" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_SINGLE_FOREST_DISTRIBUTION_DIAGNOSTICS|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 2 do throw "FM_SINGLE_FOREST_DISTRIBUTION_DIAGNOSTICS requires forest."
+                local forestName = decodeBase64Utf8 parts[2]
+                return "{\"ok\":true,\"command\":\"FM_SINGLE_FOREST_DISTRIBUTION_DIAGNOSTICS\",\"data\":" + singleForestDistributionDiagnosticsJson forestName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_SINGLE_FOREST_DISTRIBUTION_DIAGNOSTICS" (getCurrentException())
+            )
+        )
+
+
+        if matchPattern command pattern:"FM_SINGLE_FOREST_DIVERSITY_MAP_BIND|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count < 3 or parts.count > 4 do throw "FM_SINGLE_FOREST_DIVERSITY_MAP_BIND requires forest, map path, and optional strict flag."
+                local forestName = decodeBase64Utf8 parts[2]
+                local encodedMapPath = parts[3]
+                local strictVerify = true
+                if parts.count == 4 do strictVerify = (parts[4] == "1")
+                return "{\"ok\":true,\"command\":\"FM_SINGLE_FOREST_DIVERSITY_MAP_BIND\",\"data\":" + plantGroupBindSingleForestDiversityMapJson forestName encodedMapPath strictVerify + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_SINGLE_FOREST_DIVERSITY_MAP_BIND" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_SINGLE_FOREST_DIVERSITY_MAP_REFRESH|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FM_SINGLE_FOREST_DIVERSITY_MAP_REFRESH requires forest and map path."
+                local forestName = decodeBase64Utf8 parts[2]
+                local encodedMapPath = parts[3]
+                return "{\"ok\":true,\"command\":\"FM_SINGLE_FOREST_DIVERSITY_MAP_REFRESH\",\"data\":" + plantGroupBindSingleForestDiversityMapJson forestName encodedMapPath false + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_SINGLE_FOREST_DIVERSITY_MAP_REFRESH" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_PLANT_GROUP_SPECIES_FAST_APPLY|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 6 do throw "FM_PLANT_GROUP_SPECIES_FAST_APPLY requires forest, species IDs, enabled, scale and probability tokens."
+                local forestName = decodeBase64Utf8 parts[2]
+                local speciesCsv = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FM_PLANT_GROUP_SPECIES_FAST_APPLY\",\"data\":" + plantGroupSpeciesFastApplyJson forestName speciesCsv parts[4] parts[5] parts[6] + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_PLANT_GROUP_SPECIES_FAST_APPLY" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_PLANT_GROUP_AREA_FINALIZE|*" ignoreCase:true then
+        (
+            try
+            (
+                -- Parse the original command. Base64 tokens are case-sensitive and
+                -- must never be read from the uppercase routing copy.
+                local parts = filterString cleanCommand "|"
+                if parts.count != 4 do throw "FM_PLANT_GROUP_AREA_FINALIZE requires forest, base Area indices and group keys."
+                local forestName = decodeBase64Utf8 parts[2]
+                local baseIndicesCsv = decodeBase64Utf8 parts[3]
+                local groupKeysCsv = decodeBase64Utf8 parts[4]
+                return "{\"ok\":true,\"command\":\"FM_PLANT_GROUP_AREA_FINALIZE\",\"data\":" + plantGroupAreaFinalizeJson forestName baseIndicesCsv groupKeysCsv + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_PLANT_GROUP_AREA_FINALIZE" (getCurrentException())
+            )
+        )
+
+        if command == "FM_PLANT_GROUP_MANIFEST_GET" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"FM_PLANT_GROUP_MANIFEST_GET\",\"data\":" + plantGroupManifestGetJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_PLANT_GROUP_MANIFEST_GET" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_PLANT_GROUP_MANIFEST_SET|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 2 do throw "FM_PLANT_GROUP_MANIFEST_SET requires one manifest token."
+                local manifestText = decodeBase64Utf8 parts[2]
+                return "{\"ok\":true,\"command\":\"FM_PLANT_GROUP_MANIFEST_SET\",\"data\":" + plantGroupManifestSetJson manifestText + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_PLANT_GROUP_MANIFEST_SET" (getCurrentException())
+            )
+        )
+
+        if command == "FM_MANAGED_ENSURE" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"FM_MANAGED_ENSURE\",\"data\":" + ensureManagedSceneJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_MANAGED_ENSURE" (getCurrentException())
+            )
+        )
+
+        if command == "FM_MANAGED_PROTECT_ALL" then
+        (
+            try
+            (
+                local moved = protectAllManagedNodes()
+                return "{\"ok\":true,\"command\":\"FM_MANAGED_PROTECT_ALL\",\"data\":{\"protected\":" + stringArrayJson moved + ",\"status\":" + managedSceneStatusJson() + ",\"verified\":true},\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_MANAGED_PROTECT_ALL" (getCurrentException())
+            )
+        )
+
+        if command == "FM_MANAGED_STATUS" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"FM_MANAGED_STATUS\",\"data\":" + managedSceneStatusJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_MANAGED_STATUS" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_MANAGED_CREATE_FOREST|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FM_MANAGED_CREATE_FOREST requires name and role tokens."
+                local forestName = decodeBase64Utf8 parts[2]
+                local roleName = decodeBase64Utf8 parts[3]
+                return "{\"ok\":true,\"command\":\"FM_MANAGED_CREATE_FOREST\",\"data\":" + createManagedForestJson forestName roleName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_MANAGED_CREATE_FOREST" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_MANAGED_DELETE_FOREST|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 2 do throw "FM_MANAGED_DELETE_FOREST requires one name token."
+                local forestName = decodeBase64Utf8 parts[2]
+                return "{\"ok\":true,\"command\":\"FM_MANAGED_DELETE_FOREST\",\"data\":" + deleteManagedForestJson forestName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_MANAGED_DELETE_FOREST" (getCurrentException())
+            )
+        )
 
         if matchPattern command pattern:"FOREST_CONTROL_ADD_GEOMETRY_SOURCE|*" ignoreCase:true then
         (
@@ -7480,6 +9064,33 @@ struct ForestManagerBridgeState
             )
         )
 
+        if command == "FM_CLOSED_SPLINE_CANDIDATES" then
+        (
+            try
+            (
+                return "{\"ok\":true,\"command\":\"FM_CLOSED_SPLINE_CANDIDATES\",\"data\":" + closedSplineCandidatesJson() + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_CLOSED_SPLINE_CANDIDATES" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_STAGE8_ENSURE_PRIMARY_FOREST|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 2 do throw "FM_STAGE8_ENSURE_PRIMARY_FOREST requires one spline name token."
+                local splineName = decodeBase64Utf8 parts[2]
+                return "{\"ok\":true,\"command\":\"FM_STAGE8_ENSURE_PRIMARY_FOREST\",\"data\":" + ensureStage8PrimaryForestJson splineName + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_STAGE8_ENSURE_PRIMARY_FOREST" (getCurrentException())
+            )
+        )
+
         if command == "GET_SELECTION_SPLINE_AREA" then
         (
             try
@@ -7946,16 +9557,6 @@ struct ForestManagerBridgeState
             (
                 pollTimer.Stop()
                 pollTimer.Dispose()
-            )
-        )
-        catch()
-
-        try
-        (
-            if reloadTimer != undefined do
-            (
-                reloadTimer.Stop()
-                reloadTimer.Dispose()
             )
         )
         catch()
