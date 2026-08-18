@@ -6,10 +6,10 @@ from typing import Any
 from forest_manager.forest_control.schema import semantic_domains
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
 from forest_manager.forest_control.plant_group_execution import (
-    execute_plant_group_manifest,
     refresh_plant_group_distribution_fast,
     refresh_plant_group_diversity_map,
 )
+from forest_manager.forest_control.scene_runtime import ForestSceneRuntime
 from forest_manager.forest_control.semantic_transaction import (
     UnifiedControlOperation,
     UnifiedControlTransactionManager,
@@ -96,9 +96,11 @@ class ForestManagerUIController:
         self,
         service: ForestPackControlService | None = None,
         transaction_manager: UnifiedControlTransactionManager | None = None,
+        scene_runtime: ForestSceneRuntime | None = None,
     ) -> None:
         self.service = service or ForestPackControlService()
         self.transaction_manager = transaction_manager or UnifiedControlTransactionManager(self.service)
+        self.scene_runtime = scene_runtime or ForestSceneRuntime(service=self.service)
         self._state = ForestUIState()
         self._pending: dict[str, PendingEdit] = {}
         self._semantic_map = self._build_semantic_map()
@@ -1062,7 +1064,7 @@ class ForestManagerUIController:
             raise ForestControlError("Plant-group artist setting write was not verified.")
         if key == "density_spacing":
             try:
-                execution = execute_plant_group_manifest(manifest, service=self.service)
+                execution = self.scene_runtime.execute_manifest(manifest)
                 if execution.get("verified") is not True:
                     raise ForestControlError("Plant-group distribution execution was not verified.")
             except Exception:
@@ -1365,7 +1367,7 @@ class ForestManagerUIController:
             # edited Area spline, rebind the diversity map, restore the
             # authored grid/collision values, and rebuild the scatter even if
             # the spline geometry changed while Forest Manager was closed.
-            distribution_result = execute_plant_group_manifest(manifest, service=self.service, strict_acceptance=False)
+            distribution_result = self.scene_runtime.execute_manifest(manifest, strict_acceptance=False)
             if distribution_result.get("verified") is not True:
                 raise ForestControlError("Reset scene rebuild was not verified.")
 
