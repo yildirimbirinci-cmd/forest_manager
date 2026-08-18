@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from forest_manager.forest_control.service import ForestControlError
+from forest_manager.forest_control.unit_conversion import UnitConversionGateway
 from forest_manager.forest_control.semantic_transaction import UnifiedControlOperation
 
 
@@ -109,7 +110,7 @@ class SemanticCalibrationPlanner:
         elif not size_row.writable:
             blocked.append(f"{size_row.name}:read_only")
         else:
-            size_system = self.controller._display_distance_to_system(profile["size_m"], self.controller.state.scene_units)
+            size_system = UnitConversionGateway.display_to_system(profile["size_m"], self.controller.state.scene_units)
             operations.append(UnifiedControlOperation(property_name=size_row.name, value=size_system, label="semantic:cluster_character"))
 
         for property_name in ("clurough", "clunoise", "cluedge"):

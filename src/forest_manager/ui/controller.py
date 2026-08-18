@@ -5,6 +5,7 @@ from typing import Any
 
 from forest_manager.forest_control.schema import semantic_domains
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
+from forest_manager.forest_control.unit_conversion import UnitConversionGateway
 from forest_manager.forest_control.plant_group_execution import (
     refresh_plant_group_distribution_fast,
     refresh_plant_group_diversity_map,
@@ -567,29 +568,16 @@ class ForestManagerUIController:
 
     @staticmethod
     def _display_distance_contract(scene_units: dict[str, Any] | None) -> tuple[float, str]:
-        units = scene_units or {}
-        display_unit = str(units.get("display_unit") or "").strip().lower()
-        if display_unit in {"meter", "meters", "metre", "metres", "m"}:
-            factor = float(units.get("one_meter_system_units") or 0.0)
-            return (factor if factor > 0.0 else 1.0, "m")
-        if display_unit in {"centimeter", "centimeters", "centimetre", "centimetres", "cm"}:
-            factor = float(units.get("one_centimeter_system_units") or 0.0)
-            return (factor if factor > 0.0 else 1.0, "cm")
-        if display_unit in {"millimeter", "millimeters", "millimetre", "millimetres", "mm"}:
-            factor = float(units.get("one_millimeter_system_units") or 0.0)
-            return (factor if factor > 0.0 else 1.0, "mm")
-        suffix = str(units.get("display_unit") or "").strip() or "units"
-        return (1.0, suffix)
+        contract = UnitConversionGateway.display_contract(scene_units)
+        return contract.system_units_per_display_unit, contract.suffix
 
-    @classmethod
-    def _system_distance_to_display(cls, value: Any, scene_units: dict[str, Any] | None) -> tuple[float, str]:
-        factor, suffix = cls._display_distance_contract(scene_units)
-        return float(value) / factor, suffix
+    @staticmethod
+    def _system_distance_to_display(value: Any, scene_units: dict[str, Any] | None) -> tuple[float, str]:
+        return UnitConversionGateway.system_to_display(value, scene_units)
 
-    @classmethod
-    def _display_distance_to_system(cls, value: Any, scene_units: dict[str, Any] | None) -> float:
-        factor, _suffix = cls._display_distance_contract(scene_units)
-        return float(value) * factor
+    @staticmethod
+    def _display_distance_to_system(value: Any, scene_units: dict[str, Any] | None) -> float:
+        return UnitConversionGateway.display_to_system(value, scene_units)
 
     def _infer_naturalness_choice(self, by_name: dict[str, PropertyRow]) -> str | None:
         for choice, profile in NATURALNESS_CANDIDATES.items():
