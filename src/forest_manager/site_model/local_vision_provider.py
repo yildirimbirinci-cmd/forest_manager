@@ -51,7 +51,7 @@ class LocalVisionProvider:
 
     @staticmethod
     def _prompt() -> str:
-        return """Analyze this landscape reference image for Forest Manager.\n\nReturn ONLY valid JSON. No markdown. No explanation.\n\nSchema:\n{\n  \"groups\": [\n    {\n      \"label\": \"short human-readable group name\",\n      \"semantic_role\": \"foreground_mass|mid_accent|purple_accent|flower_accent|structural_shrub|ornamental_grass|tree_canopy|groundcover|other\",\n      \"coverage_weight\": 0.0,\n      \"naturalness\": \"Ordered|Balanced|Natural\",\n      \"cluster_character\": \"Individual|Small Groups|Medium Clusters|Large Masses\",\n      \"confidence\": 0.0,\n      \"species_candidates\": [{\"name\": \"visual species hypothesis\", \"confidence\": 0.0}]\n    }\n  ]\n}\n\nRules:\n- Detect visually distinct designed planting groups actually present.\n- Group count is variable; never force exactly 3 or 5 groups.\n- coverage_weight values should approximately sum to 1.0.\n- Do not include unrelated background vegetation as a planting-bed group.\n- Prefer useful landscape-design groups over tiny isolated details.\n- Species candidates are visual hypotheses only. Do not claim certainty where ambiguous.\n- confidence values are from 0.0 to 1.0.\n"""
+        return """Analyze this landscape reference image for Forest Manager.\n\nReturn ONLY valid JSON. No markdown. No explanation.\n\nSchema:\n{\n  \"groups\": [\n    {\n      \"label\": \"short human-readable group name\",\n      \"semantic_role\": \"foreground_mass|mid_accent|purple_accent|flower_accent|structural_shrub|ornamental_grass|tree_canopy|groundcover|other\",\n      \"coverage_weight\": 0.0,\n      \"naturalness\": \"Ordered|Balanced|Natural\",\n      \"cluster_character\": \"Individual|Small Groups|Medium Clusters|Large Masses\",\n      \"confidence\": 0.0,\n      \"species_candidates\": [{\"name\": \"visual species hypothesis\", \"confidence\": 0.0}]\n    }\n  ]\n}\n\nRules:\n- Detect visually distinct designed planting groups actually present.\n- Group count is variable; never force exactly 3 or 5 groups.\n- coverage_weight values should approximately sum to 1.0.\n- Do not include unrelated background vegetation as a planting-bed group.\n- Prefer useful landscape-design groups over tiny isolated details.\n- Every group except semantic_role=other must include 1 to 3 non-empty species_candidates.\n- When species identity is ambiguous, provide multiple plausible alternatives instead of leaving species_candidates empty.\n- Keep growth form consistent with semantic_role: structural_shrub candidates must be shrubs, tree_canopy candidates must be trees, groundcover candidates must be low groundcovers, and ornamental_grass candidates must be grasses.\n- Prefer recognizable botanical/common plant names useful for matching a real asset library; include genus/species names when visually plausible.\n- Species candidates are visual hypotheses only. Do not claim certainty where ambiguous.\n- confidence values are from 0.0 to 1.0.\n"""
 
     @staticmethod
     def _post_json(endpoint: str, body: bytes, timeout_seconds: float) -> dict[str, Any]:
@@ -161,22 +161,62 @@ class LocalVisionProvider:
                 group["coverage_weight"] = float(group["coverage_weight"] / total)
         return tuple(groups)
 
-    def analyze(self, image_path: str) -> LocalVisionResult:
-        path = Path(image_path).expanduser().resolve()
-        if not path.is_file():
-            raise FileNotFoundError(f"Reference image does not exist: {path}")
-        mime = "image/png" if path.suffix.casefold() == ".png" else "image/jpeg"
-        image_data = base64.b64encode(path.read_bytes()).decode("ascii")
+    @staticmethod
+    def _refinement_prompt(first_groups: tuple[dict[str, Any], ...]) -> str:
+        compact = [
+            {
+                "label": group.get("label"),
+                "semantic_role": group.get("semantic_role"),
+                "coverage_weight": group.get("coverage_weight"),
+                "naturalness": group.get("naturalness"),
+                "cluster_character": group.get("cluster_character"),
+                "confidence": group.get("confidence"),
+                "species_candidates": group.get("species_candidates"),
+            }
+            for group in first_groups
+        ]
+        return (
+            "Audit and refine this first-pass Forest Manager planting-group analysis against the same image.\n\n"
+            "Return ONLY valid JSON using exactly the same schema with a top-level groups array.\n"
+            "Do not add decorative/background groups that are not actually part of the designed planting.\n"
+            "Keep the group count stable unless two groups are clearly duplicates.\n"
+            "Every group except semantic_role=other must contain 1 to 3 non-empty species_candidates.\n"
+            "When identification is uncertain, provide multiple plausible alternatives instead of an empty list.\n"
+            "Growth form must agree with semantic_role: shrubs as structural_shrub, trees as tree_canopy, "
+            "low plants as groundcover, grasses as ornamental_grass, and flowering herbaceous plants as flower accents.\n"
+            "If the first pass paired a species with the wrong growth-form role, correct the role or the species candidates.\n"
+            "Prefer botanical/common names that can be matched against a real 3D plant asset library.\n"
+            "Do not claim certainty; use confidence values.\n\n"
+            "First-pass JSON:\n" + json.dumps({"groups": compact}, ensure_ascii=True)
+        )
+
+    @staticmethod
+    def _audit_refined_groups(groups: tuple[dict[str, Any], ...]) -> tuple[str, ...]:
+        """Return unresolved non-other group labels without aborting the full vision result.
+
+        Refinement is best-effort. Groups that still have no species candidates
+        remain in the AI result and are excluded later by the existing T2
+        resolution contract as ``no_species_candidates``. One unresolved group
+        must not discard otherwise valid resolved groups.
+        """
+        return tuple(
+            str(group.get("label") or group.get("semantic_role") or "group")
+            for group in groups
+            if str(group.get("semantic_role") or "").strip() != "other"
+            and not tuple(group.get("source_names") or ())
+        )
+
+    def _request_groups(self, *, image_data: str, mime: str, prompt: str, temperature: float) -> tuple[dict[str, Any], ...]:
         body = {
             "model": self.model_id,
             "messages": [{
                 "role": "user",
                 "content": [
-                    {"type": "text", "text": self._prompt()},
+                    {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{image_data}"}},
                 ],
             }],
-            "temperature": 0.1,
+            "temperature": float(temperature),
             "max_tokens": 2200,
         }
         response = self._transport(
@@ -191,8 +231,30 @@ class LocalVisionProvider:
             raise LocalVisionProviderError("Vision model did not return valid Plant Group JSON.") from exc
         if not isinstance(parsed, dict):
             raise LocalVisionProviderError("Vision model Plant Group result must be a JSON object.")
+        return self._normalize_groups(parsed)
+
+    def analyze(self, image_path: str) -> LocalVisionResult:
+        path = Path(image_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Reference image does not exist: {path}")
+        mime = "image/png" if path.suffix.casefold() == ".png" else "image/jpeg"
+        image_data = base64.b64encode(path.read_bytes()).decode("ascii")
+
+        first_groups = self._request_groups(
+            image_data=image_data,
+            mime=mime,
+            prompt=self._prompt(),
+            temperature=0.1,
+        )
+        refined_groups = self._request_groups(
+            image_data=image_data,
+            mime=mime,
+            prompt=self._refinement_prompt(first_groups),
+            temperature=0.05,
+        )
+        self._audit_refined_groups(refined_groups)
         return LocalVisionResult(
             provider="forest_manager_local",
             model=self.model_id,
-            groups=self._normalize_groups(parsed),
+            groups=refined_groups,
         )

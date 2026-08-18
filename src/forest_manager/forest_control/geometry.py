@@ -137,38 +137,60 @@ def _material_ref_name(value: Any) -> str | None:
 
 
 class GeometrySourcesAdapter:
-    """Stage 5D.40 adapter constrained to the verified bridge capability surface.
+    """Geometry List adapter constrained to verified bridge capability.
 
-    The current bridge exposes geometry source arrays through read-only discovery.
-    Historical bytecode described a transactional write path, but the corresponding
-    bridge endpoints are absent from the verified Stage 5D.39 baseline.  Writes are
-    therefore rejected instead of being simulated or claimed as supported.
+    Complete reads use the verified FOREST_CONTROL_GET_ARRAY_ELEMENT endpoint.
+    Writes remain governed by the explicit verified write surface and are never
+    simulated from discovery metadata.
     """
 
     def __init__(self, service: ForestPackControlService | None = None) -> None:
         self.service = service or ForestPackControlService()
 
     def read_raw_record(self, forest_name: str, index: int) -> dict[str, Any]:
+        """Read one complete Geometry List record through verified array endpoints.
+
+        The public adapter remains 1-based because Forest Pack Geometry List rows
+        are presented that way to the rest of Forest Manager. The bridge endpoint
+        is explicitly zero-based, so the conversion happens exactly once here.
+
+        Discovery array previews are intentionally not used: they expose only a
+        bounded diagnostic prefix and are not a complete runtime record API.
+        """
+        if isinstance(index, bool) or not isinstance(index, int):
+            raise ForestControlError("Geometry source index must be an integer.")
         if index < 1:
             raise ForestControlError("Geometry source indices are 1-based.")
-        inventory = self.service.inventory(forest_name)
-        props = {
-            str(prop.get("name") or ""): prop
-            for prop in (inventory.get("properties") or [])
-            if isinstance(prop, Mapping)
-        }
-        cobj = props.get("cobjlist") or {}
-        metadata = cobj.get("array_metadata") if isinstance(cobj, Mapping) else None
-        count = int((metadata or {}).get("count") or 0) if isinstance(metadata, Mapping) else 0
+
+        zero_index = index - 1
+        first = self.service.get_array_element(
+            forest_name,
+            "cobjlist",
+            zero_index,
+            preflight=True,
+        )
+        count = int(first.get("count") or 0)
         if index > count:
             raise ForestControlError(
                 f"Geometry source index out of range: {forest_name}[{index}] count={count}"
             )
-        if index > 8:
-            raise ForestControlError(
-                "Current verified bridge exposes only the first 8 array elements in discovery preview."
+
+        raw: dict[str, Any] = {"cobjlist": first.get("value")}
+        for property_name in GEOMETRY_SOURCE_ARRAYS[1:]:
+            element = self.service.get_array_element(
+                forest_name,
+                property_name,
+                zero_index,
+                preflight=False,
             )
-        return {name: _preview_value(props.get(name) or {}, index) for name in GEOMETRY_SOURCE_ARRAYS}
+            element_count = int(element.get("count") or 0)
+            if element_count != count:
+                raise ForestControlError(
+                    "Geometry source array count mismatch: "
+                    + f"{forest_name}.{property_name} count={element_count}, cobjlist count={count}"
+                )
+            raw[property_name] = element.get("value")
+        return raw
 
     def read_record(self, forest_name: str, index: int) -> GeometrySourceRecord:
         raw = self.read_raw_record(forest_name, index)

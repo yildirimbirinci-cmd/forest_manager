@@ -9,6 +9,12 @@ from forest_manager.forest_control.unit_conversion import UnitConversionGateway
 from forest_manager.forest_control.plant_group_execution import refresh_plant_group_distribution_fast
 from forest_manager.forest_control.scene_runtime import ForestSceneRuntime
 from forest_manager.forest_control.scene_state import SceneStateGateway
+from forest_manager.forest_control.wall_edge_annotations import (
+    capture_selected_wall_edge_annotation,
+    read_wall_edge_annotation,
+    remove_wall_edge_annotation,
+    upsert_wall_edge_annotation,
+)
 from forest_manager.forest_control.semantic_transaction import (
     UnifiedControlOperation,
     UnifiedControlTransactionManager,
@@ -86,6 +92,7 @@ class ForestUIState:
     bridge_online: bool = False
     status: str = "Not connected"
     error: str | None = None
+    wall_edge_summary: str = "No Wall Edge annotation"
 
 
 class ForestManagerUIController:
@@ -449,6 +456,7 @@ class ForestManagerUIController:
                 else f"Loaded global planting target: {len(properties)} properties"
             ),
             error=None,
+            wall_edge_summary=self._wall_edge_summary_from_manifest(group_manifest),
         )
         synced_manifest, manifest_changed = self._synchronize_group_manifest_from_scene(group_manifest)
         if manifest_changed:
@@ -558,6 +566,94 @@ class ForestManagerUIController:
             error=None,
         )
         return self._state
+
+    def _wall_edge_summary_from_manifest(self, manifest: dict[str, Any] | None, node_name: str | None = None) -> str:
+        if not isinstance(manifest, dict):
+            return "No Wall Edge annotation"
+        site_annotations = manifest.get("site_annotations")
+        wall_edges = site_annotations.get("wall_edges") if isinstance(site_annotations, dict) else None
+        if not isinstance(wall_edges, dict) or not wall_edges:
+            return "No Wall Edge annotation"
+        if node_name and node_name in wall_edges:
+            payload = wall_edges.get(node_name)
+            annotation = read_wall_edge_annotation(manifest, node_name) if isinstance(payload, dict) else None
+        elif len(wall_edges) == 1:
+            only_name = next(iter(wall_edges))
+            annotation = read_wall_edge_annotation(manifest, str(only_name))
+        else:
+            return f"{len(wall_edges)} Wall Edge annotations saved"
+        if annotation is None:
+            return "No Wall Edge annotation"
+        return (
+            f"{annotation.node_name}: {len(annotation.wall_segments)} wall segment(s), "
+            f"{len(annotation.walkway_open_segments)} walkway/open segment(s)"
+        )
+
+    def mark_selected_segments_as_wall(self) -> ForestUIState:
+        try:
+            annotation = capture_selected_wall_edge_annotation(preflight=True)
+            previous_manifest, manifest = self.scene_state.snapshot_and_working_copy(preflight=False)
+            upsert_wall_edge_annotation(manifest, annotation)
+            try:
+                self.scene_state.write_verified(
+                    manifest,
+                    preflight=False,
+                    error_message="Wall Edge annotation write was not verified.",
+                )
+                readback = self.scene_state.read_manifest(preflight=False)
+                persisted = read_wall_edge_annotation(readback, annotation.node_name)
+                if persisted != annotation:
+                    raise ForestControlError("Wall Edge annotation readback mismatch.")
+            except Exception:
+                self.scene_state.restore_snapshot(previous_manifest, preflight=False)
+                raise
+            self._state = replace(
+                self._state,
+                status=f"Wall Edge saved for {annotation.node_name}",
+                error=None,
+                wall_edge_summary=self._wall_edge_summary_from_manifest(readback, annotation.node_name),
+            )
+            return self._state
+        except Exception as exc:
+            self._state = replace(
+                self._state,
+                status="Wall Edge annotation failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return self._state
+
+    def clear_wall_edge_annotation(self) -> ForestUIState:
+        try:
+            selected = capture_selected_wall_edge_annotation(preflight=True)
+            previous_manifest, manifest = self.scene_state.snapshot_and_working_copy(preflight=False)
+            changed = remove_wall_edge_annotation(manifest, selected.node_name)
+            if changed:
+                try:
+                    self.scene_state.write_verified(
+                        manifest,
+                        preflight=False,
+                        error_message="Wall Edge annotation clear was not verified.",
+                    )
+                    readback = self.scene_state.read_manifest(preflight=False)
+                    if read_wall_edge_annotation(readback, selected.node_name) is not None:
+                        raise ForestControlError("Wall Edge annotation clear readback mismatch.")
+                except Exception:
+                    self.scene_state.restore_snapshot(previous_manifest, preflight=False)
+                    raise
+            self._state = replace(
+                self._state,
+                status=(f"Wall Edge cleared for {selected.node_name}" if changed else f"No Wall Edge saved for {selected.node_name}"),
+                error=None,
+                wall_edge_summary="No Wall Edge annotation",
+            )
+            return self._state
+        except Exception as exc:
+            self._state = replace(
+                self._state,
+                status="Wall Edge clear failed",
+                error=f"{type(exc).__name__}: {exc}",
+            )
+            return self._state
 
     def select_forest(self, forest_name: str) -> ForestUIState:
         try:

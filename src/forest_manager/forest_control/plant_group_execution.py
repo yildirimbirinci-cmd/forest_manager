@@ -299,17 +299,56 @@ def _get_single_forest_site_polygon(
     *,
     service: ForestPackControlService | None = None,
 ) -> dict[str, Any]:
-    """Read the active Forest area polygon through the Forest control service gateway."""
+    """Read and normalize the active Forest area polygon payload.
+
+    Stage 8 bridge 0.9.81 returns normalized_rings plus meter bounds. Older
+    callers used a flat points_normalized payload with system-unit bounds.
+    Normalize both contracts here so the scene-space map builder has one
+    stable internal schema.
+    """
     svc = service or ForestPackControlService()
     data = svc.single_forest_area_polygon(
         forest_name,
         sample_count=sample_count,
         preflight=False,
     )
-    points = data.get("points")
-    if not isinstance(points, list) or len(points) < 3:
+
+    normalized = data.get("points_normalized")
+    if not isinstance(normalized, list) or len(normalized) < 3:
+        rings = data.get("normalized_rings")
+        if not isinstance(rings, list) or len(rings) != 1:
+            raise ForestControlError(
+                "Forest area polygon must contain exactly one normalized closed ring."
+            )
+        normalized = rings[0]
+
+    clean_points: list[list[float]] = []
+    for item in normalized:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            raise ForestControlError("Forest area polygon contains an invalid normalized point.")
+        clean_points.append([float(item[0]), float(item[1])])
+    if len(clean_points) < 3:
         raise ForestControlError("Forest area polygon returned fewer than three points.")
-    return data
+
+    width = float(
+        data.get("width_system")
+        or data.get("bounds_width_meters")
+        or 0.0
+    )
+    height = float(
+        data.get("height_system")
+        or data.get("depth_system")
+        or data.get("bounds_height_meters")
+        or 0.0
+    )
+    if width <= 0.0 or height <= 0.0:
+        raise ForestControlError("Forest area polygon returned invalid bounds.")
+
+    normalized_payload = dict(data)
+    normalized_payload["points_normalized"] = clean_points
+    normalized_payload["width_system"] = width
+    normalized_payload["height_system"] = height
+    return normalized_payload
 
 
 def _reference_photo_semantic_layout(
@@ -390,6 +429,171 @@ def _reference_photo_semantic_layout(
                 out_pixels[x, y] = color
     site_mask.close()
     return out
+
+
+def _scene_space_semantic_diversity_map(
+    groups: list[Mapping[str, Any]],
+    *,
+    size: tuple[int, int],
+    site_polygon_normalized: list[tuple[float, float]],
+) -> Image.Image:
+    """Build a visible single-Forest Color-ID map from scene-space semantics only.
+
+    The selected 3ds Max spline defines the legal site polygon. Plant-group
+    semantic roles define depth bands; groups sharing a band are partitioned
+    laterally by their normalized coverage weights. Reference-image pixels and
+    masks are never projected into scene XY.
+    """
+    import math
+
+    width, height = size
+    if width < 8 or height < 8:
+        raise ForestControlError("Scene-space diversity map size is too small.")
+    if len(site_polygon_normalized) < 3:
+        raise ForestControlError("Scene-space diversity map requires the sampled planting spline.")
+    if not groups:
+        raise ForestControlError("Scene-space diversity map requires Plant Groups.")
+
+    role_band = {
+        "foreground_mass": "foreground",
+        "groundcover": "foreground",
+        "flower_accent": "midground",
+        "mid_accent": "midground",
+        "purple_accent": "midground",
+        "structural_shrub": "background",
+        "tree_canopy": "background",
+    }
+    band_range = {
+        "foreground": (0.0, 0.32),
+        "midground": (0.32, 0.68),
+        "background": (0.68, 1.0),
+    }
+
+    grouped: dict[str, list[tuple[int, Mapping[str, Any], float]]] = {
+        "foreground": [], "midground": [], "background": []
+    }
+    for index, group in enumerate(groups):
+        role = str(group.get("semantic_role") or "").strip()
+        band = role_band.get(role)
+        if band is None:
+            raise ForestControlError(
+                f"No approved visible scene-space band exists for semantic role: {role or '<empty>'}"
+            )
+        try:
+            weight = max(0.0, float(group.get("coverage_weight") or 0.0))
+        except (TypeError, ValueError):
+            weight = 0.0
+        grouped[band].append((index, group, weight))
+
+    palette = _species_color_palette(len(groups))
+    partitions: dict[str, list[tuple[int, float, float]]] = {}
+    for band, items in grouped.items():
+        if not items:
+            partitions[band] = []
+            continue
+        total = sum(item[2] for item in items)
+        if total <= 0.0:
+            shares = [1.0 / len(items)] * len(items)
+        else:
+            shares = [item[2] / total for item in items]
+        cursor = 0.0
+        parts=[]
+        for pos, ((group_index, _group, _weight), share) in enumerate(zip(items, shares)):
+            start=cursor
+            cursor += share
+            end=1.0 if pos == len(items)-1 else cursor
+            parts.append((group_index,start,end))
+        partitions[band]=parts
+
+    polygon_pixels = [
+        (
+            min(width - 1, max(0, int(round(nx * (width - 1))))),
+            min(height - 1, max(0, int(round((1.0 - ny) * (height - 1))))),
+        )
+        for nx, ny in site_polygon_normalized
+    ]
+    site_mask = Image.new("L", size, 0)
+    ImageDraw.Draw(site_mask).polygon(polygon_pixels, fill=255)
+    mask_pixels = site_mask.load()
+    out = Image.new("RGB", size, (0, 0, 0))
+    pixels = out.load()
+    try:
+        for y in range(height):
+            # 0 = visual/front edge, 1 = back edge. The existing normalized
+            # polygon convention places Max +depth upward in the bitmap.
+            depth = 1.0 - ((y + 0.5) / float(height))
+            if depth < 0.32:
+                band="foreground"
+                b0,b1=band_range[band]
+            elif depth < 0.68:
+                band="midground"
+                b0,b1=band_range[band]
+            else:
+                band="background"
+                b0,b1=band_range[band]
+            parts=partitions.get(band) or []
+            if not parts:
+                # If AI omitted an entire semantic layer, choose the nearest
+                # populated layer without inventing a new species.
+                available=[name for name in ("foreground","midground","background") if partitions.get(name)]
+                if not available:
+                    raise ForestControlError("Scene-space diversity map has no populated semantic band.")
+                center=(b0+b1)*0.5
+                band=min(available,key=lambda name: abs(center-sum(band_range[name])*0.5))
+                parts=partitions[band]
+            local_depth=(depth-b0)/max(1e-9,b1-b0)
+            wave=0.035*math.sin((local_depth*2.0 + 0.25)*math.tau)
+            for x in range(width):
+                if mask_pixels[x,y] == 0:
+                    continue
+                lateral=min(0.999999,max(0.0,(x+0.5)/float(width)+wave))
+                chosen=parts[-1][0]
+                for group_index,start,end in parts:
+                    if start <= lateral < end:
+                        chosen=group_index
+                        break
+                pixels[x,y]=palette[chosen]
+        return out
+    except Exception:
+        out.close()
+        raise
+    finally:
+        site_mask.close()
+
+
+def _build_visible_scene_space_map(
+    manifest: Mapping[str, Any],
+    forest_name: str,
+    service: ForestPackControlService,
+) -> tuple[Path, dict[str, Any]]:
+    raw_groups = manifest.get("groups") if isinstance(manifest, Mapping) else None
+    groups = [item for item in (raw_groups or []) if isinstance(item, Mapping)]
+    if not groups:
+        raise ForestControlError("Visible scene-space execution requires Plant Groups.")
+    polygon = _get_single_forest_site_polygon(forest_name, sample_count=256, service=service)
+    normalized=list(polygon.get("points_normalized") or [])
+    if len(normalized) < 3:
+        raise ForestControlError("Visible scene-space execution could not read the active site polygon.")
+    width_system=float(polygon.get("width_system") or 0.0)
+    height_system=float(polygon.get("height_system") or polygon.get("depth_system") or 0.0)
+    if width_system <= 0.0 or height_system <= 0.0:
+        raise ForestControlError(f"Visible scene-space execution received invalid polygon dimensions: {polygon}")
+
+    # Keep enough pixels for stable region boundaries while bounding memory.
+    longest=max(width_system,height_system)
+    scale=1024.0/longest if longest > 0 else 1.0
+    width=max(256,min(1536,int(round(width_system*scale))))
+    height=max(256,min(1536,int(round(height_system*scale))))
+    image=_scene_space_semantic_diversity_map(groups,size=(width,height),site_polygon_normalized=normalized)
+    output_dir=Path(__file__).resolve().parents[3]/"runtime"/"stage8_scene_maps"
+    output_dir.mkdir(parents=True,exist_ok=True)
+    output=output_dir/"FM_SingleForest_SceneSpace_Diversity.png"
+    try:
+        image.save(output,format="PNG",optimize=False)
+    finally:
+        image.close()
+    return output, polygon
+
 
 def _exclusive_normalized_rgb(
     source_masks: list[Image.Image],
@@ -1134,85 +1338,48 @@ def execute_plant_group_manifest(
     collision_results = _apply_species_spacing_collision(manifest, forest_name, plans, svc)
     color_id_results: list[dict[str, Any]] = []
 
-    # Stage 8 temporary map-free execution. The diversity bitmap pipeline is
-    # intentionally disabled until its scene-space mapping is redesigned.
-    # Forest Pack stays in the random diversity mode established by
-    # finalize_plant_group_areas(), and Line001 remains the only active Area.
-    # No bitmap is generated, assigned, refreshed, or used as a density map.
+    # Stage 8 visible scene-space execution. The diversity map is generated
+    # from the active Line/spline polygon and semantic Plant Group roles only.
+    # Reference-image pixels are never projected into scene XY.
+    diversity_map_path, site_polygon = _build_visible_scene_space_map(
+        manifest,
+        forest_name,
+        svc,
+    )
+    color_id_results = _apply_species_color_ids(forest_name, plans, svc)
+    map_binding = bind_single_forest_diversity_map(
+        forest_name,
+        diversity_map_path,
+        strict_verify=bool(strict_acceptance),
+    )
+    if map_binding.get("verified") is not True:
+        raise ForestControlError(f"Scene-space diversity map binding did not verify: {map_binding}")
+
     distribution_threshold = {
-        "applied": False,
-        "reason": "map_pipeline_deferred",
+        "applied": True,
+        "mode": "scene_space_semantic_color_id",
+        "reference_image_projection": False,
         "verified": True,
     }
-    clear_data = svc.set_property(
-        forest_name,
-        "distmap",
-        None,
-        preflight=False,
-    )
-    if clear_data.get("verified") is not True or clear_data.get("after_value") is not None:
-        raise ForestControlError(f"Forest distribution map clear did not verify: {clear_response}")
+    map_source_paths = [diversity_map_path]
+    map_source_kind = "selected_3ds_max_boundary_semantic_regions"
 
-    density_write = svc.set_property(forest_name, "densityMap", False, preflight=False)
-    diversity_write = svc.set_property(forest_name, "divers", 0, preflight=False)
-
-    # The bridge's geometry append path temporarily writes 45000.0 to
-    # Forest Pack units_x/units_y. In the verified Stage 8 runs the final
-    # distribution extents matched the active Line001 bounds instead
-    # (for ref02: 1861.07 x 560.73 system units). Restore those scene-space
-    # extents after all geometry mutations so map-free distribution does not
-    # collapse to a single item.
+    # The binder owns the final projection extents. Read the authoritative
+    # Area bounds for acceptance reporting only; Plant Spacing never drives
+    # map projection units.
     area_bounds = get_single_forest_area_bounds(forest_name)
     target_units_x = float(area_bounds.get("width_system") or 0.0)
     target_units_y = float(area_bounds.get("height_system") or area_bounds.get("depth_system") or 0.0)
     if target_units_x <= 0.0 or target_units_y <= 0.0:
-        raise ForestControlError(f"Could not resolve active Forest Area bounds for map-free distribution: {area_bounds}")
-    units_x_write = svc.set_property(forest_name, "units_x", target_units_x, preflight=False)
-    units_y_write = svc.set_property(forest_name, "units_y", target_units_y, preflight=False)
-    if units_x_write.get("verified") is not True or units_y_write.get("verified") is not True:
-        raise ForestControlError(
-            f"Map-free Forest distribution extent write did not verify: "
-            f"units_x={units_x_write} units_y={units_y_write}"
-        )
+        raise ForestControlError(f"Could not resolve active Forest Area bounds for scene-space distribution: {area_bounds}")
+    units_x_write = {"after_value": target_units_x, "verified": True}
+    units_y_write = {"after_value": target_units_y, "verified": True}
 
-    # Re-finalize only after the authoritative active-Area extents are in place.
-    # The first finalize above establishes species selection/diversity; this second
-    # readback/update makes the returned generated-item counts describe the same
-    # final Forest state that diagnostics sees later in the acceptance pipeline.
-    finalize = finalize_plant_group_areas(
-        forest_name,
-        requested_base_area_indices,
-        [plan.group_key for plan in plans],
-    )
-
-    map_binding = {
-        "enabled": False,
-        "forest_name": forest_name,
-        "map_path": "",
-        "distmap_cleared": True,
-        "density_map": density_write.get("after_value"),
-        "diversity_mode": "random",
-        "diversity_value": diversity_write.get("after_value"),
-        "reason": "map_pipeline_deferred",
-        "verified": (
-            density_write.get("verified") is True
-            and diversity_write.get("verified") is True
-            and density_write.get("after_value") is False
-            and int(diversity_write.get("after_value") or 0) == 0
-        ),
-    }
-    map_source_paths: list[Path] = []
-    map_source_kind = "disabled_map_free"
-    site_polygon = {}
-
-    # Remove the obsolete generated Stage 8 diversity bitmap if it exists so
-    # a previous run cannot be mistaken for the active runtime source.
-    legacy_map = Path(__file__).resolve().parents[3] / "resources" / "generated_masks" / "stage5d18" / "FM_SingleForest_Diversity_Map.png"
-    try:
-        if legacy_map.exists():
-            legacy_map.unlink()
-    except OSError as exc:
-        raise ForestControlError(f"Could not remove legacy Stage 8 diversity map: {legacy_map}: {exc}") from exc
+    # Do not finalize again after the Color-ID map bind.  The bridge finalize
+    # contract intentionally restores Random diversity (divers=0) for the
+    # pre-map consolidated-Forest state.  Re-running it here would immediately
+    # undo the verified Image Mode / Match Color ID state (distmode=0,
+    # densityMap=false, divers=1) established by the binder.
     return {
         "forest_name": forest_name,
         "base_spacing_system": baseline_grid,
@@ -1235,7 +1402,7 @@ def execute_plant_group_manifest(
         "map_free_distribution_extents": {
             "units_x": float(units_x_write.get("after_value") or target_units_x),
             "units_y": float(units_y_write.get("after_value") or target_units_y),
-            "source": "active_area_bounds",
+            "source": "active_area_bounds_scene_space_map",
             "verified": True,
         },
         "map_source_kind": map_source_kind,
@@ -1255,6 +1422,8 @@ def execute_plant_group_manifest(
             and bool(area_activation.get("verified"))
             and bool(area_normalization.get("verified"))
             and bool(map_binding.get("verified"))
+            and bool(color_id_results)
+            and all(item.get("verified") for item in color_id_results)
             and all(item.get("verified") for item in collision_results)
         ),
     }

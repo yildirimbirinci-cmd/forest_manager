@@ -109,6 +109,17 @@ def _strict_candidate_score(record: T2AssetRecord, requested_name: str) -> int:
 
     requested_words = tuple(_singular_word(word) for word in _words(requested_name))
     record_words = set(_words(record.name)) | set(_words(record.file_path.stem))
+
+    # Strict matching must never promote a trailing epithet/cultivar token by
+    # itself. For multi-token AI species hypotheses, require the leading token
+    # to be present in the T2 asset name unless the full requested name already
+    # matched above. This prevents false positives such as
+    # Prunus 'Nigra' -> Carex nigra while preserving genus-level matches such as
+    # Salvia nemorosa -> Salvia 'Little Spire', Rosa 'Knock Out' -> Rosa canina,
+    # and Carex vulpinoidea -> Carex nigra.
+    if len(requested_words) >= 2 and requested_words[0] not in record_words:
+        return 0
+
     matched = sum(1 for word in requested_words if word and word in record_words)
     if matched <= 0:
         return 0
@@ -119,6 +130,25 @@ def _strict_candidate_score(record: T2AssetRecord, requested_name: str) -> int:
         score += 20
     return score
 
+
+
+def _strict_query_evidence_score(record: T2AssetRecord, search_term: str) -> int:
+    """Score an explicit catalog sub-query using whole-word evidence only."""
+    term_words = tuple(_singular_word(word) for word in _words(search_term))
+    if not term_words:
+        return 0
+    record_words = {
+        _singular_word(word)
+        for word in (set(_words(record.name)) | set(_words(record.file_path.stem)))
+        if word
+    }
+    matched = sum(1 for word in term_words if word and word in record_words)
+    if matched != len(term_words):
+        return 0
+    score = matched * 5000
+    if record.source == "database":
+        score += 20
+    return score
 
 def _candidate_score(record: T2AssetRecord, requested_name: str, aliases: Iterable[str]) -> tuple[int, int, str]:
     requested = _norm(requested_name)
@@ -202,16 +232,24 @@ class Stage8T2AssetResolver:
         return best
 
     def resolve_asset_strict(self, requested_name: str, semantic_role: str) -> T2AssetRecord:
-        """Resolve an AI species hypothesis without semantic-role substitution."""
-        candidates: list[T2AssetRecord] = []
-        seen: set[str] = set()
+        """Resolve an AI species hypothesis without semantic-role substitution.
+
+        The base scorer remains strict for multiword hypotheses: a record cannot
+        win merely because it shares the trailing word. Common-name fallback is
+        allowed only when the T2 catalog itself returned the record for a
+        narrower lexical search term (for example ``coneflower`` or ``maple``).
+        Quoted cultivar hypotheses never use this token-query fallback, which
+        prevents false matches such as ``Prunus 'Nigra'`` -> ``Carex nigra``.
+        """
+        candidate_terms: dict[str, tuple[T2AssetRecord, set[str]]] = {}
         for term in _strict_search_terms(requested_name):
             for record in self.catalog.search_max_assets(term, limit=100, require_existing_file=True):
                 key = str(record.file_path).casefold()
-                if key not in seen:
-                    seen.add(key)
-                    candidates.append(record)
-        if not candidates:
+                if key not in candidate_terms:
+                    candidate_terms[key] = (record, set())
+                candidate_terms[key][1].add(str(term))
+
+        if not candidate_terms:
             diagnostics = self.catalog.diagnostics()
             roots = diagnostics.get("library_roots") or []
             raise Stage8AssetResolutionError(
@@ -220,17 +258,40 @@ class Stage8T2AssetResolver:
                 f"T2 database={diagnostics.get('database')}; library_roots={roots}"
             )
 
-        scored = [
-            (_strict_candidate_score(record, requested_name), record)
-            for record in candidates
+        candidates = [record for record, _terms in candidate_terms.values()]
+        compatible = [
+            (record, terms)
+            for record, terms in candidate_terms.values()
             if _asset_matches_semantic_role(record, semantic_role)
         ]
-        if not scored:
+        if not compatible:
             buckets = sorted({_asset_bucket(record) for record in candidates})
             raise Stage8AssetResolutionError(
                 f"T2 candidates for AI species '{requested_name}' were rejected by semantic asset category "
                 f"compatibility (role={semantic_role}, candidate_categories={buckets})."
             )
+
+        requested_text = str(requested_name or "").strip()
+        quoted_cultivar = "'" in requested_text or '"' in requested_text
+        requested_norm = _norm(requested_name)
+
+        scored: list[tuple[int, T2AssetRecord]] = []
+        for record, matched_terms in compatible:
+            score = _strict_candidate_score(record, requested_name)
+
+            if score <= 0 and not quoted_cultivar:
+                for term in matched_terms:
+                    term_norm = _norm(term)
+                    if not term_norm or term_norm == requested_norm:
+                        continue
+                    evidence_score = _strict_query_evidence_score(record, term)
+                    if evidence_score > 0:
+                        # Query evidence is deliberately weaker than a direct
+                        # full-hypothesis match, and requires whole-word
+                        # evidence so "rose" cannot promote "rosemary".
+                        score = max(score, min(evidence_score, 20000))
+            scored.append((score, record))
+
         best_score = max(score for score, _record in scored)
         if best_score <= 0:
             raise Stage8AssetResolutionError(
@@ -294,13 +355,17 @@ class Stage8T2AssetResolver:
     ) -> tuple[str, ...]:
         """Return current Forest Geometry source names without mutating the scene."""
         names: list[str] = []
-        for index in range(1, int(max_items) + 1):
+        # Forest Pack array access is zero-based throughout the verified runtime
+        # path. Starting at 1 silently skipped Geometry source 0, which made an
+        # existing first source look missing and could trigger a duplicate T2
+        # append. Keep the first live read at index 0 and preflight only once.
+        for index in range(0, int(max_items)):
             try:
                 row = self.control_service.get_array_element(
                     forest_name,
                     "namelist",
                     index,
-                    preflight=preflight if index == 1 else False,
+                    preflight=preflight if index == 0 else False,
                 )
             except Exception:
                 break

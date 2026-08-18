@@ -84,3 +84,31 @@ def test_strict_ai_resolution_allows_plant_asset_for_flower_role():
     resolver = Stage8T2AssetResolver(catalog=catalog, control_service=object())
     resolved = resolver.resolve_asset_strict("purple coneflower", "flower_accent")
     assert resolved.name == "Rudbeckia 'Goldsturm' (Coneflower)"
+def test_strict_ai_resolution_rejects_quoted_cultivar_token_query_cross_genus():
+    carex = _record(
+        "Carex nigra (Sedge)",
+        "C:/T2/Asset Library/3D/03_VEGETATIONS/02_Plants/Carex nigra/Carex nigra.max",
+    )
+    catalog = FakeCatalog({
+        "prunus nigra": (),
+        "nigra": (carex,),
+        "prunus": (),
+    })
+    resolver = Stage8T2AssetResolver(catalog=catalog, control_service=object())
+    with pytest.raises(Stage8AssetResolutionError, match="none had a lexical species/name match"):
+        resolver.resolve_asset_strict("Prunus 'Nigra'", "structural_shrub")
+
+
+def test_common_name_query_evidence_fallback_preserves_coneflower_resolution():
+    coneflower = _record(
+        "Rudbeckia 'Goldsturm' (Coneflower)",
+        "C:/T2/Asset Library/3D/03_VEGETATIONS/02_Plants/Rudbeckia/Rudbeckia.max",
+    )
+    catalog = FakeCatalog({
+        "purple coneflower": (),
+        "coneflower": (coneflower,),
+        "purple": (),
+    })
+    resolver = Stage8T2AssetResolver(catalog=catalog, control_service=object())
+    resolved = resolver.resolve_asset_strict("purple coneflower", "flower_accent")
+    assert resolved.name == "Rudbeckia 'Goldsturm' (Coneflower)"

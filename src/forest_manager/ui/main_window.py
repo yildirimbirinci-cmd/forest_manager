@@ -247,8 +247,36 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
             form.addRow(spec.label, editor)
         layout.addWidget(group)
 
+        edge_group = QGroupBox("Planting Boundary Context")
+        edge_layout = QVBoxLayout(edge_group)
+        edge_note = QLabel(
+            "In 3ds Max, select the closed planting Line, enter Segment sub-object mode, "
+            "select only the segment(s) facing a wall/building, then mark them as Wall Edge. "
+            "All unmarked boundary segments are treated as walkway/open edge."
+        )
+        edge_note.setWordWrap(True)
+        edge_layout.addWidget(edge_note)
+        self.wall_edge_summary = QLabel("No Wall Edge annotation")
+        self.wall_edge_summary.setWordWrap(True)
+        edge_layout.addWidget(self.wall_edge_summary)
+        edge_actions = QHBoxLayout()
+        self.mark_wall_edge_button = QPushButton("Mark Selected Segments as Wall")
+        self.clear_wall_edge_button = QPushButton("Clear Wall Edge")
+        self.mark_wall_edge_button.clicked.connect(self._mark_wall_edge)
+        self.clear_wall_edge_button.clicked.connect(self._clear_wall_edge)
+        edge_actions.addWidget(self.mark_wall_edge_button)
+        edge_actions.addWidget(self.clear_wall_edge_button)
+        edge_layout.addLayout(edge_actions)
+        layout.addWidget(edge_group)
+
         layout.addStretch(1)
         return page
+
+    def _mark_wall_edge(self) -> None:
+        self._apply_state(self.controller.mark_selected_segments_as_wall())
+
+    def _clear_wall_edge(self) -> None:
+        self._apply_state(self.controller.clear_wall_edge_annotation())
 
     def _artist_control_changed(self, key: str, value: Any) -> None:
         if self._updating_artist_controls:
@@ -479,6 +507,10 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         self.apply_button.setEnabled(bool(state.pending_edits) and state.bridge_online)
         self.revert_button.setEnabled(bool(state.pending_edits))
         self.reset_button.setEnabled(bool(state.selected_forest) and state.bridge_online)
+        if hasattr(self, "wall_edge_summary"):
+            self.wall_edge_summary.setText(state.wall_edge_summary)
+            self.mark_wall_edge_button.setEnabled(bool(state.bridge_online))
+            self.clear_wall_edge_button.setEnabled(bool(state.bridge_online))
 
         property_pending_names = frozenset(
             name for name in pending_names if not name.startswith("__plant_group__|")

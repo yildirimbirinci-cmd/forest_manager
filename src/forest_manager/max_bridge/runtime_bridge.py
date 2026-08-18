@@ -12,12 +12,12 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 49491
-EXPECTED_BRIDGE_VERSION = "0.9.79"
-EXPECTED_BRIDGE_BUILD_ID = "stage8-world-map-projection-20260818q"
+EXPECTED_BRIDGE_VERSION = "0.9.99"
+EXPECTED_BRIDGE_BUILD_ID = "stage8-helper-layer-lifecycle-20260818a"
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
 RELOAD_BOOTSTRAP_FILENAME = "ForestManager_BridgeBootstrap.ms"
-STAGED_BRIDGE_FILENAME = "ForestManager_Bridge_0_9_79.ms"
+STAGED_BRIDGE_FILENAME = "ForestManager_Bridge_0_9_99.ms"
 DISABLED_STARTUP_SUFFIX = ".fm_disabled"
 
 
@@ -634,6 +634,23 @@ def finalize_plant_group_areas(
     return data
 
 
+
+def read_selected_spline_segments(*, preflight: bool = True) -> dict:
+    """Read artist-selected segments from one selected closed 3ds Max spline.
+
+    Segment indices are returned 1-based to match Max spline topology. This is
+    read-only; it never changes the artist's current sub-object selection.
+    """
+    if preflight:
+        ensure_current_bridge()
+    response = send_command("GET_SELECTION_SPLINE_SEGMENTS")
+    if not response.get("ok"):
+        raise RuntimeError("Selected spline segment read failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Selected spline segment read was not verified.")
+    return data
+
 def list_closed_spline_candidates() -> list[dict]:
     """Return closed spline candidates from the active 3ds Max scene.
 
@@ -661,4 +678,76 @@ def ensure_primary_forest_for_spline(spline_name: str) -> dict:
     data = response.get("data") or {}
     if data.get("verified") is not True:
         raise RuntimeError("Stage 8 primary Forest ensure was not verified.")
+    return data
+
+
+def list_stage8_vector_region_helpers(source_node_name: str, *, preflight: bool = True) -> list[str]:
+    """List Forest Manager-owned vector-region helper splines for one source boundary."""
+    if preflight:
+        ensure_current_bridge()
+    command = "FM_STAGE8_LIST_VECTOR_HELPERS|" + _encode_token(str(source_node_name).strip())
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Vector helper list failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Vector helper list was not verified.")
+    return [str(value) for value in (data.get("helper_names") or [])]
+
+
+def upsert_stage8_vector_region_helper(
+    helper_name: str,
+    source_node_name: str,
+    role: str,
+    points_world_xy: list[dict] | tuple[dict, ...],
+    *,
+    preflight: bool = False,
+) -> dict:
+    """Create or update one FM-owned closed helper spline from world-space XY points."""
+    if preflight:
+        ensure_current_bridge()
+    points = list(points_world_xy)
+    if len(points) < 3:
+        raise ValueError("Vector helper spline requires at least three points.")
+    point_text = ";".join(f"{float(p['x']):.9f},{float(p['y']):.9f}" for p in points)
+    command = "|".join((
+        "FM_STAGE8_UPSERT_VECTOR_HELPER",
+        _encode_token(str(helper_name).strip()),
+        _encode_token(str(source_node_name).strip()),
+        _encode_token(str(role).strip()),
+        _encode_token(point_text),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Vector helper upsert failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Vector helper upsert was not verified.")
+    return data
+
+
+def delete_stage8_vector_region_helper(helper_name: str, *, preflight: bool = False) -> dict:
+    """Delete one Forest Manager-owned vector-region helper by exact name."""
+    if preflight:
+        ensure_current_bridge()
+    command = "FM_STAGE8_DELETE_VECTOR_HELPER|" + _encode_token(str(helper_name).strip())
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Vector helper delete failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Vector helper delete was not verified.")
+    return data
+
+
+def ensure_stage8_helper_layer(*, preflight: bool = True) -> dict:
+    """Create/reuse FM_HELPERS, migrate FM-owned region helpers, and hide the layer."""
+    if preflight:
+        ensure_current_bridge()
+    response = send_command("FM_STAGE8_ENSURE_HELPER_LAYER")
+    if not response.get("ok"):
+        raise RuntimeError("Stage 8 helper layer ensure failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True or data.get("layer_name") != "FM_HELPERS" or data.get("hidden") is not True:
+        raise RuntimeError("Stage 8 helper layer ensure was not verified.")
     return data
