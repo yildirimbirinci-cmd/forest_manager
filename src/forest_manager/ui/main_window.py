@@ -10,7 +10,7 @@ from .semantic_controls import artist_control_specs
 from .project_viewer import ProjectViewerWidget
 
 try:
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import Qt, QTimer
     from PySide6.QtWidgets import (
         QApplication,
         QAbstractItemView,
@@ -99,6 +99,13 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         self._updating_group_controls = False
         self._rendered_properties_ref = None
         self._rendered_pending_names: frozenset[str] = frozenset()
+        # Plant Group controls use the already-verified controller live-write
+        # endpoints. Debouncing prevents command floods while preserving the
+        # final value and keeps Advanced property editing on the existing
+        # pending/apply contract.
+        self._live_sync_delay_ms = 75
+        self._plant_group_live_timers: dict[str, QTimer] = {}
+        self._plant_group_live_values: dict[str, Any] = {}
         self.setWindowTitle("Forest Manager")
         self.resize(1280, 800)
         self._build_ui()
@@ -155,12 +162,12 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         self.group_scale.setDecimals(2)
         self.group_scale.setRange(0.01, 10000.0)
         self.group_scale.setSuffix(" %")
-        self.group_scale.editingFinished.connect(self._group_scale_changed)
+        self.group_scale.valueChanged.connect(lambda value: self._schedule_plant_group_live("scale", value))
         self.group_probability = CompactDoubleSpinBox()
         self.group_probability.setDecimals(2)
         self.group_probability.setRange(0.0, 100.0)
         self.group_probability.setSuffix(" %")
-        self.group_probability.editingFinished.connect(self._group_probability_changed)
+        self.group_probability.valueChanged.connect(lambda value: self._schedule_plant_group_live("probability", value))
         group_form.addRow("Species", self.group_species_label)
         group_form.addRow("Visibility", self.group_enabled)
         group_form.addRow("Species Size", self.group_scale)
@@ -247,6 +254,29 @@ class ForestManagerMainWindow(QMainWindow if QApplication is not None else objec
         if self._updating_artist_controls:
             return
         self._apply_state(self.controller.set_artist_control(key, value))
+
+    def _schedule_plant_group_live(self, field: str, value: Any) -> None:
+        if self._updating_group_controls:
+            return
+        self._plant_group_live_values[field] = value
+        timer = self._plant_group_live_timers.get(field)
+        if timer is None:
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda live_field=field: self._flush_plant_group_live(live_field))
+            self._plant_group_live_timers[field] = timer
+        timer.start(self._live_sync_delay_ms)
+
+    def _flush_plant_group_live(self, field: str) -> None:
+        if field not in self._plant_group_live_values:
+            return
+        value = self._plant_group_live_values.pop(field)
+        if field == "scale":
+            self._apply_state(self.controller.set_selected_group_scale(value))
+            return
+        if field == "probability":
+            self._apply_state(self.controller.set_selected_group_probability(value))
+            return
 
     def _group_enabled_changed(self, enabled: bool) -> None:
         if self._updating_group_controls:
