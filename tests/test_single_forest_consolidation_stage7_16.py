@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
@@ -21,7 +21,7 @@ def test_bridge_identity_and_manifest_contract():
     bridge = (ROOT / "maxscripts" / "ForestManager_Bridge.ms").read_text(encoding="utf-8")
     runtime = (ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py").read_text(encoding="utf-8")
     assert '0.9.79' in bridge
-    assert "stage8-versioned-bridge-no-watcher-20260817a" in bridge
+    assert "stage8-world-map-projection-20260818q" in bridge
     assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in runtime
     assert "FM_PLANT_GROUP_MANIFEST_GET" in bridge
     assert "FM_PLANT_GROUP_MANIFEST_SET" in bridge

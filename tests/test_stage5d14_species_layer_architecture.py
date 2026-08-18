@@ -53,5 +53,5 @@ def test_architecture_keeps_legacy_forest_for_rollback():
 def test_versions_match():
     bridge = BRIDGE.read_text(encoding="utf-8")
     runtime = RUNTIME.read_text(encoding="utf-8")
-    assert '"bridge_version":"0.9.54"' in bridge or '\\"bridge_version\\":\\"0.9.54\\"' in bridge
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in runtime
+    assert '"bridge_version":"0.9.79"' in bridge or '\\"bridge_version\\":\\"0.9.79\\"' in bridge
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in runtime

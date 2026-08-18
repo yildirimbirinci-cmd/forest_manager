@@ -10,23 +10,23 @@ def test_bridge_supports_reload_command():
     assert "fileIn pathToLoad" in BRIDGE
 
 def test_reload_is_deferred_until_after_response():
-    assert "reloadTimer.Interval = 250" in BRIDGE
-    assert "reloadTimer.Start()" in BRIDGE
+    assert "ForestManagerBridgeReloadTimer.Interval = 500" in BRIDGE
+    assert "ForestManagerBridgeReloadTimer.Start()" in BRIDGE
 
 def test_stop_cleans_reload_timer_listener_and_poll_timer():
-    assert "reloadTimer.Stop()" in BRIDGE
-    assert "reloadTimer.Dispose()" in BRIDGE
+    assert "ForestManagerBridgeReloadTimer.Stop()" in BRIDGE
+    assert "ForestManagerBridgeReloadTimer.Dispose()" in BRIDGE
     assert "listener.Stop()" in BRIDGE
     assert "pollTimer.Dispose()" in BRIDGE
 
 def test_shared_runtime_uses_project_bridge_file():
-    assert 'project_root() / "maxscripts" / "ForestManager_Bridge.ms"' in RUNTIME
+    assert 'project_root() / "maxscripts" / STAGED_BRIDGE_FILENAME' in RUNTIME
     assert '"RELOAD_BRIDGE|" + encoded' in RUNTIME
 
 def test_shared_runtime_verifies_current_bridge_version():
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in RUNTIME
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in RUNTIME
     assert "version == EXPECTED_BRIDGE_VERSION" in RUNTIME
-    assert "bridge_version" in BRIDGE and "0.9.54" in BRIDGE
+    assert "bridge_version" in BRIDGE and "0.9.79" in BRIDGE
 
 def test_reload_cli_delegates_to_shared_preflight():
     assert "ensure_current_bridge" in CLI

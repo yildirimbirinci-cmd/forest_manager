@@ -20,7 +20,7 @@ def test_bridge_auto_start_loader_contract() -> None:
     assert 'AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"' in text
     assert "def install_startup_bridge_loader()" in text
     assert "fileIn fmBridgePath quiet:true" in text
-    assert "startup_paths = install_startup_bridge_loader()" in text
+    assert "def _disable_startup_loaders()" in text
 
 
 def test_stage5d25_restart_state_contract() -> None:

@@ -902,6 +902,80 @@ class ForestManagerUIController:
         )
         return self._state
 
+    def _persist_group_runtime_value(self, group: PlantGroupTarget, field: str, value: Any) -> None:
+        manifest = read_plant_group_manifest()
+        raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
+        if not isinstance(raw_groups, list):
+            raise ForestControlError("Plant-group manifest is missing or invalid.")
+        target = next(
+            (item for item in raw_groups if isinstance(item, dict) and str(item.get("group_id") or "") == group.group_id),
+            None,
+        )
+        if target is None:
+            raise ForestControlError(f"Plant group is missing from the scene manifest: {group.group_id}")
+        artist_values = target.get("artist_values")
+        if not isinstance(artist_values, dict):
+            artist_values = {}
+            target["artist_values"] = artist_values
+        key = {
+            "enabled": "species_enabled",
+            "scale": "species_scale_percent",
+            "probability": "species_probability_percent",
+        }[field]
+        artist_values[key] = value
+        result = write_plant_group_manifest(manifest)
+        if result.get("verified") is not True:
+            raise ForestControlError("Plant-group live setting write was not verified.")
+
+    def _apply_group_runtime_live(self, group: PlantGroupTarget, field: str, value: Any) -> ForestUIState:
+        indices = self._group_geometry_indices(group)
+        species_ids: list[int] = []
+        for index in indices:
+            species_id = int(
+                self.service.get_array_element(
+                    group.forest_name, "specidlist", index, preflight=False
+                ).get("value")
+                or 0
+            )
+            if species_id > 0:
+                species_ids.append(species_id)
+        if not species_ids:
+            raise ForestControlError(f"Plant Group species IDs could not be resolved: {group.group_id}")
+
+        kwargs: dict[str, Any] = {}
+        if field == "enabled":
+            kwargs["enabled"] = bool(value)
+        elif field == "scale":
+            kwargs["scale_percent"] = float(value)
+        elif field == "probability":
+            kwargs["probability_percent"] = float(value)
+        else:
+            raise ForestControlError(f"Unsupported live Plant Group field: {field}")
+
+        result = apply_plant_group_species_runtime(group.forest_name, species_ids, **kwargs)
+        if result.get("verified") is not True:
+            raise ForestControlError(f"Plant Group live {field} update was not verified.")
+        self._persist_group_runtime_value(group, field, value)
+
+        runtime = dict(self._state.selected_group_runtime or {})
+        runtime_key = {
+            "enabled": "enabled",
+            "scale": "scale_percent",
+            "probability": "probability_percent",
+        }[field]
+        runtime[runtime_key] = value
+        self._group_runtime_cache[group.group_id] = dict(runtime)
+        pending_key = self._group_pending_key(group.group_id, field)
+        self._pending.pop(pending_key, None)
+        self._state = replace(
+            self._state,
+            selected_group_runtime=runtime,
+            pending_edits=tuple(self._pending.values()),
+            status=f"{group.label}: {field.replace('_', ' ').title()} live synced to 3ds Max",
+            error=None,
+        )
+        return self._state
+
     def _stage_group_edit(
         self, group: PlantGroupTarget, field: str, original_value: Any, value: Any, editor_kind: str
     ) -> ForestUIState:
@@ -932,8 +1006,7 @@ class ForestManagerUIController:
             group = self._selected_plant_group()
             if group is None or not group.manifest_backed:
                 raise ForestControlError("Select a Plant Group before changing species visibility.")
-            runtime = self._selected_group_runtime_cached(group)
-            return self._stage_group_edit(group, "enabled", bool(runtime.get("enabled")), bool(enabled), "bool")
+            return self._apply_group_runtime_live(group, "enabled", bool(enabled))
         except Exception as exc:
             self._state = replace(self._state, status="Plant Group visibility edit rejected", error=f"{type(exc).__name__}: {exc}")
             return self._state
@@ -946,9 +1019,7 @@ class ForestManagerUIController:
             group = self._selected_plant_group()
             if group is None or not group.manifest_backed:
                 raise ForestControlError("Select a Plant Group before changing species scale.")
-            runtime = self._selected_group_runtime_cached(group)
-            original = float(runtime.get("scale_percent") if runtime.get("scale_percent") is not None else 100.0)
-            return self._stage_group_edit(group, "scale", original, value, "float")
+            return self._apply_group_runtime_live(group, "scale", value)
         except Exception as exc:
             self._state = replace(self._state, status="Plant Group scale edit rejected", error=f"{type(exc).__name__}: {exc}")
             return self._state
@@ -961,9 +1032,7 @@ class ForestManagerUIController:
             group = self._selected_plant_group()
             if group is None or not group.manifest_backed:
                 raise ForestControlError("Select a Plant Group before changing species probability.")
-            runtime = self._selected_group_runtime_cached(group)
-            original = float(runtime.get("probability_percent") if runtime.get("probability_percent") is not None else 0.0)
-            return self._stage_group_edit(group, "probability", original, value, "float")
+            return self._apply_group_runtime_live(group, "probability", value)
         except Exception as exc:
             self._state = replace(self._state, status="Plant Group probability edit rejected", error=f"{type(exc).__name__}: {exc}")
             return self._state

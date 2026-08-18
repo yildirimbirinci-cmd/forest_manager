@@ -46,8 +46,8 @@ def test_new_measurement_command_is_routed():
 
 
 def test_bridge_preflight_targets_0_9_15():
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in RUNTIME.read_text(encoding="utf-8")
-    assert r'\"bridge_version\":\"0.9.54\"' in source()
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in RUNTIME.read_text(encoding="utf-8")
+    assert r'\"bridge_version\":\"0.9.79\"' in source()
 
 
 def test_cli_uses_automatic_preflight():

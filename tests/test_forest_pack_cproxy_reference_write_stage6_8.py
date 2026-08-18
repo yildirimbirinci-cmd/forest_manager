@@ -8,7 +8,7 @@ import pytest
 import forest_manager.forest_control.service as service_module
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
 
-BUILD = "stage8-13-atomic-source-area-contract-20260816a"
+BUILD = "stage8-world-map-projection-20260818q"
 
 
 class FakeCProxyReferenceBridge:

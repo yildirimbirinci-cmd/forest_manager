@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 
 def test_plant_group_handlers_preserve_case_sensitive_base64_tokens():
@@ -20,4 +20,4 @@ def test_python_expects_fixed_bridge_identity():
     root = Path(__file__).resolve().parents[1]
     runtime = (root / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py").read_text(encoding="utf-8")
     assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in runtime
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-versioned-bridge-no-watcher-20260817a"' in runtime
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-world-map-projection-20260818q"' in runtime

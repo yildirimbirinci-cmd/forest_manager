@@ -30,4 +30,4 @@ def test_app_default_is_075_meters():
 
 def test_bridge_version_matches_current_contract():
     s = BRIDGE.read_text(encoding="utf-8")
-    assert "bridge_version" in s and "0.9.54" in s
+    assert "bridge_version" in s and "0.9.79" in s

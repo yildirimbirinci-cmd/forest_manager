@@ -1,4 +1,4 @@
-﻿from pathlib import Path
+from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 BRIDGE = (ROOT / 'maxscripts' / 'ForestManager_Bridge.ms').read_text(encoding='utf-8')
@@ -7,9 +7,9 @@ RUNTIME = (ROOT / 'src' / 'forest_manager' / 'max_bridge' / 'runtime_bridge.py')
 
 def test_bridge_identity_matches_runtime():
     assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in RUNTIME
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-versioned-bridge-no-watcher-20260817a"' in RUNTIME
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-world-map-projection-20260818q"' in RUNTIME
     assert r'\"bridge_version\":\"0.9.79\"' in BRIDGE
-    assert r'\"bridge_build_id\":\"stage8-versioned-bridge-no-watcher-20260817a\"' in BRIDGE
+    assert r'\"bridge_build_id\":\"stage8-world-map-projection-20260818q\"' in BRIDGE
 
 
 def test_managed_layer_contract_exists():

@@ -30,4 +30,4 @@ def test_shared_runtime_surfaces_raw_invalid_bridge_response():
 
 def test_bridge_version_matches_current_contract():
     source = BRIDGE.read_text(encoding="utf-8")
-    assert "bridge_version" in source and "0.9.54" in source
+    assert "bridge_version" in source and "0.9.79" in source

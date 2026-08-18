@@ -8,10 +8,10 @@ RUNTIME = (ROOT / "src" / "forest_manager" / "max_bridge" / "runtime_bridge.py")
 def test_bridge_identity_forces_reload():
     # The identity has advanced since Stage 5D.33; this regression contract must
     # verify the currently shipped bridge/runtime pair, not pin the historical id.
-    assert '\\"bridge_version\\":\\"0.9.54\\"' in BRIDGE
-    assert '\\"bridge_build_id\\":\\"stage8-13-atomic-source-area-contract-20260816a\\"' in BRIDGE
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in RUNTIME
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-13-atomic-source-area-contract-20260816a"' in RUNTIME
+    assert '\\"bridge_version\\":\\"0.9.79\\"' in BRIDGE
+    assert '\\"bridge_build_id\\":\\"stage8-world-map-projection-20260818q\\"' in BRIDGE
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in RUNTIME
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-world-map-projection-20260818q"' in RUNTIME
 
 
 def test_endpoint_is_not_double_escaped():

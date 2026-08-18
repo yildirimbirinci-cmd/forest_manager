@@ -9,7 +9,7 @@ BRIDGE = ROOT / "maxscripts" / "ForestManager_Bridge.ms"
 
 def test_shared_runtime_targets_latest_bridge():
     source = RUNTIME.read_text(encoding="utf-8")
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in source
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in source
     assert '"RELOAD_BRIDGE|" + encoded' in source
     assert "ensure_current_bridge" in source
 
@@ -34,11 +34,11 @@ def test_preflight_does_not_reload_when_version_already_current():
 
 def test_preflight_failure_reports_self_healing_startup_context():
     source = RUNTIME.read_text(encoding="utf-8")
-    assert "Automatic bridge preflight failed." in source
-    assert "Automatic startup loader installed for:" in source
-    assert "Restart 3ds Max once if no bridge is currently listening." in source
+    assert "Bridge reload did not verify:" in source
+    assert "Versioned bridge handoff failed." in source
+    assert "No existing .ms file was modified." in source
 
 
 def test_bridge_version_is_0_9_14():
     source = BRIDGE.read_text(encoding="utf-8")
-    assert '\\"bridge_version\\":\\"0.9.54\\"' in source
+    assert '\\"bridge_version\\":\\"0.9.79\\"' in source

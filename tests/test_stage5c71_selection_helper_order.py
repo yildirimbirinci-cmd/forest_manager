@@ -23,9 +23,9 @@ def test_measurement_function_calls_defined_helper():
 
 
 def test_bridge_version_is_0_9_16():
-    assert 'bridge_version' in source() and '0.9.54' in source()
+    assert 'bridge_version' in source() and '0.9.79' in source()
 
 
 def test_runtime_preflight_expects_0_9_16():
     s = RUNTIME.read_text(encoding="utf-8")
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in s
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in s

@@ -27,10 +27,10 @@ def test_python_facade_preserves_discovery_and_promoted_write_endpoints():
 
 
 def test_bridge_identity_matches_runtime():
-    assert "0.9.54" in BRIDGE
-    assert 'EXPECTED_BRIDGE_VERSION = "0.9.54"' in RUNTIME
-    assert "stage8-13-atomic-source-area-contract-20260816a" in BRIDGE
-    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-13-atomic-source-area-contract-20260816a"' in RUNTIME
+    assert "0.9.79" in BRIDGE
+    assert 'EXPECTED_BRIDGE_VERSION = "0.9.79"' in RUNTIME
+    assert "stage8-world-map-projection-20260818q" in BRIDGE
+    assert 'EXPECTED_BRIDGE_BUILD_ID = "stage8-world-map-projection-20260818q"' in RUNTIME
 
 
 def test_stage5d32_discovery_json_is_not_double_escaped():
