@@ -6,10 +6,7 @@ from typing import Any
 from forest_manager.forest_control.schema import semantic_domains
 from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
 from forest_manager.forest_control.unit_conversion import UnitConversionGateway
-from forest_manager.forest_control.plant_group_execution import (
-    refresh_plant_group_distribution_fast,
-    refresh_plant_group_diversity_map,
-)
+from forest_manager.forest_control.plant_group_execution import refresh_plant_group_distribution_fast
 from forest_manager.forest_control.scene_runtime import ForestSceneRuntime
 from forest_manager.forest_control.scene_state import SceneStateGateway
 from forest_manager.forest_control.semantic_transaction import (
@@ -1481,10 +1478,10 @@ class ForestManagerUIController:
                         execution = refresh_plant_group_distribution_fast(manifest, service=self.service)
                         if execution.get("verified") is not True:
                             raise ForestControlError("Plant-group spacing Apply did not refresh the single-Forest distribution.")
-                    elif edited_fields & {"enabled", "naturalness", "cluster_character"}:
-                        execution = refresh_plant_group_diversity_map(manifest)
-                        if execution.get("verified") is not True:
-                            raise ForestControlError("Plant-group map Apply was not verified.")
+                    # Diversity-map generation is intentionally parked. Semantic edits
+                    # such as naturalness/cluster character are persisted in the
+                    # scene-authoritative manifest, but must not enter the deferred
+                    # map pipeline during the stable map-free runtime.
 
                     # Geometry item edits use a single bridge transaction per group.
                     # This avoids repeated GET/SET/update/redraw cycles and forces a
