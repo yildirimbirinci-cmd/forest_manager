@@ -13,7 +13,7 @@ from pathlib import Path
 HOST = "127.0.0.1"
 PORT = 49491
 EXPECTED_BRIDGE_VERSION = "0.9.79"
-EXPECTED_BRIDGE_BUILD_ID = "stage8-versioned-bridge-no-watcher-20260817a"
+EXPECTED_BRIDGE_BUILD_ID = "stage8-world-map-projection-20260818q"
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
 RELOAD_BOOTSTRAP_FILENAME = "ForestManager_BridgeBootstrap.ms"
@@ -561,7 +561,11 @@ def get_single_forest_area_bounds(forest_name: str) -> dict:
         raise RuntimeError("Single-Forest area bounds were not verified.")
     return data
 
-def get_single_forest_distribution_diagnostics(forest_name: str) -> dict:
+def get_single_forest_distribution_diagnostics(
+    forest_name: str,
+    *,
+    require_color_id_binding: bool = True,
+) -> dict:
     command = "|".join((
         "FM_SINGLE_FOREST_DISTRIBUTION_DIAGNOSTICS",
         _encode_token(forest_name),
@@ -570,7 +574,7 @@ def get_single_forest_distribution_diagnostics(forest_name: str) -> dict:
     if not response.get("ok"):
         raise RuntimeError("Single-Forest distribution diagnostics failed: " + json.dumps(response, ensure_ascii=False))
     data = response.get("data") or {}
-    if data.get("verified") is not True:
+    if require_color_id_binding and data.get("verified") is not True:
         raise RuntimeError("Single-Forest distribution diagnostics were not verified.")
     return data
 

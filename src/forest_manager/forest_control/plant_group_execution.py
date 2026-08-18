@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import base64
 from pathlib import Path
 from typing import Any, Mapping
 
-from PIL import Image, ImageChops, ImageFilter
+from PIL import Image, ImageChops, ImageFilter, ImageDraw
 
 from forest_manager.max_bridge.runtime_bridge import (
     bind_single_forest_diversity_map,
     get_single_forest_area_bounds,
     refresh_single_forest_diversity_map,
+    send_command,
     finalize_plant_group_areas,
     upsert_plant_group_area,
 )
@@ -220,9 +222,17 @@ def _normalized_species_shares(
     per-Geometry collision radius. Naturalness and Cluster Character are the
     only controls allowed to reshape the spatial mask.
     """
+    mask_count = len(source_masks)
+    if mask_count <= 0:
+        return []
+    if len(groups) < mask_count:
+        raise ForestControlError(
+            f"Plant-group manifest has fewer groups than diversity masks: groups={len(groups)} masks={mask_count}"
+        )
+
     active: list[bool] = []
     weighted: list[float] = []
-    for index, group in enumerate(groups[:3]):
+    for index, group in enumerate(groups[:mask_count]):
         artist_values = group.get("artist_values") if isinstance(group.get("artist_values"), Mapping) else {}
         enabled = artist_values.get("species_enabled") is not False
         active.append(enabled)
@@ -230,7 +240,7 @@ def _normalized_species_shares(
 
     total = sum(weighted)
     if total <= 0.0:
-        return [0.0, 0.0, 0.0]
+        return [0.0] * mask_count
     shares = [value / total for value in weighted]
 
     active_indices = [i for i, flag in enumerate(active) if flag]
@@ -253,17 +263,173 @@ def _normalized_species_shares(
     return shares
 
 
+def _species_color_palette(count: int) -> tuple[tuple[int, int, int], ...]:
+    """Return deterministic, non-black Forest Pack Color IDs for N groups.
+
+    Preserve the historically accepted first three IDs as pure R/G/B so
+    existing three-species scenes remain byte-compatible. Additional IDs are
+    sampled from HSV space with fixed saturation/value and deterministic hue.
+    """
+    import colorsys
+
+    if count <= 0:
+        return ()
+    base = [(255, 0, 0), (0, 255, 0), (0, 0, 255)]
+    if count <= 3:
+        return tuple(base[:count])
+    colors = list(base)
+    # Golden-ratio hue stepping avoids near-adjacent colors as the group count
+    # grows while remaining stable across runs and machines.
+    golden = 0.6180339887498949
+    hue = 0.11
+    while len(colors) < count:
+        hue = (hue + golden) % 1.0
+        r, g, b = colorsys.hsv_to_rgb(hue, 0.78, 1.0)
+        candidate = (int(round(r * 255)), int(round(g * 255)), int(round(b * 255)))
+        if candidate != (0, 0, 0) and candidate not in colors:
+            colors.append(candidate)
+    return tuple(colors)
+
+
+
+
+
+def _get_single_forest_site_polygon(forest_name: str, sample_count: int = 256) -> dict[str, Any]:
+    """Read the active Forest area spline as sampled world-space XY points."""
+    import base64
+
+    count = max(64, min(1024, int(sample_count)))
+    encoded_name = base64.b64encode(str(forest_name).encode("utf-8")).decode("ascii")
+    response = send_command(f"FM_SINGLE_FOREST_AREA_POLYGON|{encoded_name}|{count}")
+    if response.get("ok") is not True:
+        raise ForestControlError(f"Could not read Forest area polygon: {response}")
+    data = response.get("data")
+    if not isinstance(data, Mapping):
+        raise ForestControlError("Forest area polygon response is invalid.")
+    points_raw = data.get("points")
+    if not isinstance(points_raw, list) or len(points_raw) < 3:
+        raise ForestControlError("Forest area polygon contains fewer than three points.")
+    points: list[tuple[float, float]] = []
+    for item in points_raw:
+        if not isinstance(item, (list, tuple)) or len(item) < 2:
+            raise ForestControlError("Forest area polygon contains an invalid point.")
+        points.append((float(item[0]), float(item[1])))
+    min_x = float(data.get("min_x_system"))
+    min_y = float(data.get("min_y_system"))
+    max_x = float(data.get("max_x_system"))
+    max_y = float(data.get("max_y_system"))
+    width = max_x - min_x
+    height = max_y - min_y
+    if width <= 0.0 or height <= 0.0:
+        raise ForestControlError("Forest area polygon bounds are invalid.")
+    normalized = [((x - min_x) / width, (y - min_y) / height) for x, y in points]
+    return {
+        "spline_name": str(data.get("spline_name") or ""),
+        "points_world": points,
+        "points_normalized": normalized,
+        "min_x_system": min_x,
+        "min_y_system": min_y,
+        "max_x_system": max_x,
+        "max_y_system": max_y,
+        "width_system": width,
+        "height_system": height,
+        "sample_count": len(points),
+        "verified": data.get("verified") is True,
+    }
+
+def _reference_photo_semantic_layout(
+    source_masks: list[Image.Image],
+    groups: list[Mapping[str, Any]],
+    shares: list[float],
+    *,
+    size: tuple[int, int],
+    site_polygon_normalized: list[tuple[float, float]],
+) -> Image.Image:
+    """Build the scene map from the actual Line/spline silhouette.
+
+    Reference masks contribute only semantic foreground/background order and
+    relative species shares. Their pixels are never projected into scene XY.
+    """
+    import math
+
+    count = min(len(source_masks), len(groups), len(shares))
+    if count <= 0:
+        raise ForestControlError("Line-site semantic layout requires active species masks.")
+    width, height = size
+    if width <= 0 or height <= 0:
+        raise ForestControlError("Line-site semantic layout size is invalid.")
+    if len(site_polygon_normalized) < 3:
+        raise ForestControlError("Line-site semantic layout requires the sampled planting spline.")
+
+    def centroid_y(mask: Image.Image, fallback: float) -> float:
+        bbox = mask.getbbox()
+        if bbox is None:
+            return fallback
+        return (float(bbox[1]) + float(bbox[3])) * 0.5 / max(1.0, float(mask.size[1]))
+
+    active = [i for i in range(count) if float(shares[i]) > 0.0]
+    if not active:
+        raise ForestControlError("Line-site semantic layout has no enabled species.")
+
+    foreground_to_background = sorted(
+        active,
+        key=lambda i: (-centroid_y(source_masks[i], (i + 0.5) / count), i),
+    )
+    total = sum(float(shares[i]) for i in foreground_to_background)
+    normalized = {i: float(shares[i]) / total for i in foreground_to_background}
+    palette = _species_color_palette(count)
+
+    cumulative: list[tuple[int, float, float]] = []
+    cursor = 0.0
+    for i in foreground_to_background:
+        start = cursor
+        cursor += normalized[i]
+        cumulative.append((i, start, cursor))
+    cumulative[-1] = (cumulative[-1][0], cumulative[-1][1], 1.0)
+
+    polygon_pixels = [
+        (
+            min(width - 1, max(0, int(round(nx * (width - 1))))),
+            min(height - 1, max(0, int(round((1.0 - ny) * (height - 1))))),
+        )
+        for nx, ny in site_polygon_normalized
+    ]
+    site_mask = Image.new("L", size, 0)
+    ImageDraw.Draw(site_mask).polygon(polygon_pixels, fill=255)
+
+    out = Image.new("RGB", size, (0, 0, 0))
+    out_pixels = out.load()
+    mask_pixels = site_mask.load()
+    for y in range(height):
+        depth = 1.0 - ((y + 0.5) / max(1.0, float(height)))
+        wave = 0.018 * math.sin(((y + 0.5) / max(1.0, float(height))) * math.tau * 2.0)
+        t = min(0.999999, max(0.0, depth + wave))
+        chosen = cumulative[-1][0]
+        for species_index, start, end in cumulative:
+            if start <= t < end:
+                chosen = species_index
+                break
+        color = palette[chosen]
+        for x in range(width):
+            if mask_pixels[x, y] != 0:
+                out_pixels[x, y] = color
+    site_mask.close()
+    return out
+
 def _exclusive_normalized_rgb(
     source_masks: list[Image.Image],
     shaped_masks: list[Image.Image],
     shares: list[float],
 ) -> Image.Image:
-    """Compose pure R/G/B IDs with deterministic, mutually-exclusive pixels.
-
-    NumPy is used opportunistically when already present, but is not a runtime
-    dependency; the Pillow/byte fallback preserves identical semantics.
-    """
+    """Compose deterministic mutually-exclusive Color IDs for any group count."""
+    count = len(source_masks)
+    if count <= 0 or len(shaped_masks) != count or len(shares) != count:
+        raise ForestControlError(
+            "Diversity-map inputs must contain the same positive group count: "
+            f"source_masks={len(source_masks)}, shaped_masks={len(shaped_masks)}, shares={len(shares)}"
+        )
     size = source_masks[0].size
+    palette = _species_color_palette(count)
     try:
         import numpy as np  # type: ignore
 
@@ -279,27 +445,27 @@ def _exclusive_normalized_rgb(
         hashed = ((flat_index * np.uint64(1103515245) + np.uint64(12345)) & np.uint64(0x7FFFFFFF)).astype(np.float64)
         pick = (hashed / 2147483648.0) * totals
         cumulative = np.cumsum(weights, axis=0)
-        chosen = np.full(totals.shape, -1, dtype=np.int8)
+        chosen = np.full(totals.shape, -1, dtype=np.int32)
         previous = np.zeros(totals.shape, dtype=np.float64)
-        for i in range(3):
+        for i in range(count):
             hit = (chosen < 0) & (totals > 0.0) & (pick >= previous) & (pick < cumulative[i])
             chosen[hit] = i
             previous = cumulative[i]
-        # Numerical edge case at the upper boundary.
-        chosen[(chosen < 0) & (totals > 0.0)] = 2
-        planes = [Image.fromarray(np.where(chosen == i, 255, 0).astype(np.uint8), mode="L") for i in range(3)]
-        try:
-            return Image.merge("RGB", (planes[0], planes[1], planes[2]))
-        finally:
-            for plane in planes:
-                plane.close()
+        chosen[(chosen < 0) & (totals > 0.0)] = count - 1
+        out = np.zeros((size[1], size[0], 3), dtype=np.uint8)
+        for i, color in enumerate(palette):
+            mask = chosen == i
+            out[mask, 0] = color[0]
+            out[mask, 1] = color[1]
+            out[mask, 2] = color[2]
+        return Image.fromarray(out, mode="RGB")
     except ImportError:
         source_bytes = [mask.tobytes() for mask in source_masks]
         shaped_bytes = [mask.tobytes() for mask in shaped_masks]
         pixel_count = size[0] * size[1]
-        outs = (bytearray(pixel_count), bytearray(pixel_count), bytearray(pixel_count))
+        out = bytearray(pixel_count * 3)
         for pos in range(pixel_count):
-            authored = [i for i in range(3) if source_bytes[i][pos] >= 128 and shares[i] > 0.0]
+            authored = [i for i in range(count) if source_bytes[i][pos] >= 128 and shares[i] > 0.0]
             if not authored:
                 continue
             preferred = [i for i in authored if shaped_bytes[i][pos] >= 128]
@@ -314,37 +480,203 @@ def _exclusive_normalized_rgb(
                 if pick <= running:
                     chosen = i
                     break
-            outs[chosen][pos] = 255
-        planes = [Image.frombytes("L", size, bytes(buf)) for buf in outs]
-        try:
-            return Image.merge("RGB", (planes[0], planes[1], planes[2]))
-        finally:
-            for plane in planes:
-                plane.close()
+            color = palette[chosen]
+            offset = pos * 3
+            out[offset:offset + 3] = bytes(color)
+        return Image.frombytes("RGB", size, bytes(out))
 
 
-_SPECIES_COLOR_PALETTE = ((255, 0, 0), (0, 255, 0), (0, 0, 255))
+def _ensure_minimum_species_footprints(
+    image: Image.Image,
+    source_masks: list[Image.Image],
+    groups: list[Mapping[str, Any]],
+    *,
+    target_width_system: float | None,
+    target_height_system: float | None,
+) -> Image.Image:
+    """Preserve a physically viable Color-ID footprint for every active species.
 
+    Reference-image masks can become very small after the authored 75 m map is
+    projected onto a compact site.  A valid species may then retain a few pixels
+    but still receive no Forest Pack distribution samples.  Repair only those
+    under-sized footprints, near their own authored support, and never consume
+    another species below its own minimum.  This keeps the single-Forest map
+    deterministic while preventing a verified execution group from disappearing
+    purely because of map down-sampling.
+    """
+    count = min(len(source_masks), len(groups))
+    if count <= 1:
+        return image
+    palette = _species_color_palette(count)
+    width, height = image.size
+    if width <= 0 or height <= 0:
+        return image
 
-def _paletteize_exclusive_rgb(image: Image.Image) -> Image.Image:
-    src = image.convert("RGB")
+    width_system = float(target_width_system or 0.0)
+    height_system = float(target_height_system or 0.0)
+    px_per_system_values = []
+    if width_system > 0.0:
+        px_per_system_values.append(width / width_system)
+    if height_system > 0.0:
+        px_per_system_values.append(height / height_system)
+    px_per_system = sum(px_per_system_values) / len(px_per_system_values) if px_per_system_values else 0.0
+
+    pixels = image.load()
+    palette_index = {tuple(color): index for index, color in enumerate(palette)}
+    current = [0] * count
+    for y in range(height):
+        for x in range(width):
+            owner = palette_index.get(tuple(int(v) for v in pixels[x, y][:3]))
+            if owner is not None:
+                current[owner] += 1
+
+    targets: list[int] = []
+    supports: list[Image.Image] = []
     try:
-        data = []
-        for r, g, b in src.getdata():
-            if r >= g and r >= b and r > 0:
-                data.append(_SPECIES_COLOR_PALETTE[0])
-            elif g >= r and g >= b and g > 0:
-                data.append(_SPECIES_COLOR_PALETTE[1])
-            elif b > 0:
-                data.append(_SPECIES_COLOR_PALETTE[2])
+        for index in range(count):
+            group = groups[index]
+            artist_values = group.get("artist_values") if isinstance(group.get("artist_values"), Mapping) else {}
+            if artist_values.get("species_enabled") is False:
+                targets.append(0)
             else:
-                data.append((0, 0, 0))
-        out = Image.new("RGB", src.size)
-        out.putdata(data)
-        return out
-    finally:
-        src.close()
+                spacing_pair = group.get("spacing_system")
+                try:
+                    spacing = float(spacing_pair[0]) if isinstance(spacing_pair, (list, tuple)) and spacing_pair else 0.0
+                except (TypeError, ValueError):
+                    spacing = 0.0
+                # Forest Pack samples the distribution map on its own placement grid.
+                # A tiny but non-zero Color-ID island can therefore contain many
+                # pixels while still falling entirely between generated samples.
+                # Keep a physically meaningful footprint around the authored
+                # support: a 1.5-spacing radius gives the color island enough
+                # diameter to cross multiple placement cells on compact sites.
+                radius_px = max(3, int(round(max(0.0, spacing) * px_per_system * 1.5))) if px_per_system > 0.0 else 3
+                target_pixels = max(36, int(round(3.141592653589793 * radius_px * radius_px)))
+                targets.append(min(target_pixels, max(16, (width * height) // max(2, count))))
+            support = source_masks[index].resize((width, height), resample=Image.Resampling.NEAREST)
+            support = _threshold_mask(support, 128)
+            supports.append(support)
 
+        repair_order = sorted(range(count), key=lambda idx: (current[idx] - targets[idx], idx))
+        for index in repair_order:
+            target = targets[index]
+            if target <= 0 or current[index] >= target:
+                continue
+            support = supports[index]
+            bbox = support.getbbox()
+            if bbox is None:
+                continue
+            sx0, sy0, sx1, sy1 = bbox
+            cx = (sx0 + sx1 - 1) * 0.5
+            cy = (sy0 + sy1 - 1) * 0.5
+
+            deficit = target - current[index]
+            # Grow locally around the authored mask only as much as needed.
+            grow_radius = max(2, int(round((target / 3.141592653589793) ** 0.5)))
+            kernel = max(3, grow_radius * 2 + 1)
+            if kernel % 2 == 0:
+                kernel += 1
+            kernel = min(kernel, 63)
+            expanded = support.filter(ImageFilter.MaxFilter(size=kernel))
+            try:
+                ex = expanded.load()
+                candidates = []
+                for y in range(height):
+                    for x in range(width):
+                        if int(ex[x, y]) < 128:
+                            continue
+                        candidates.append(((x - cx) * (x - cx) + (y - cy) * (y - cy), y, x))
+                candidates.sort()
+                color = palette[index]
+                for _distance, y, x in candidates:
+                    if deficit <= 0:
+                        break
+                    old = tuple(int(v) for v in pixels[x, y][:3])
+                    old_owner = palette_index.get(old)
+                    if old_owner == index:
+                        continue
+                    if old_owner is not None and current[old_owner] <= targets[old_owner]:
+                        continue
+                    if old_owner is not None:
+                        current[old_owner] -= 1
+                    pixels[x, y] = color
+                    current[index] += 1
+                    deficit -= 1
+            finally:
+                expanded.close()
+
+        missing = [index + 1 for index in range(count) if targets[index] > 0 and current[index] < targets[index]]
+        if missing:
+            raise ForestControlError(
+                "Single-Forest diversity map could not preserve a viable Color-ID footprint for group(s): "
+                + ", ".join(str(value) for value in missing)
+            )
+        return image
+    finally:
+        for support in supports:
+            support.close()
+
+
+def _apply_species_color_ids(
+    forest_name: str,
+    plans: tuple[PlantGroupAreaPlan, ...],
+    service: ForestPackControlService,
+) -> list[dict[str, Any]]:
+    """Bind every Geometry species ID to the same deterministic palette as the map."""
+    palette = _species_color_palette(len(plans))
+    inventory = service.inventory(forest_name, preflight=False)
+    spec_prop = next(
+        (item for item in inventory.get("properties") or [] if isinstance(item, dict) and item.get("name") == "specidlist"),
+        None,
+    )
+    metadata = spec_prop.get("array_metadata") if isinstance(spec_prop, dict) else None
+    count = int((metadata or {}).get("count") or 0) if isinstance(metadata, dict) else 0
+    species_to_index: dict[int, int] = {}
+    for index in range(count):
+        value = service.get_array_element(forest_name, "specidlist", index, preflight=False).get("value")
+        try:
+            species_id = int(value or 0)
+        except (TypeError, ValueError):
+            species_id = 0
+        if species_id > 0:
+            species_to_index[species_id] = index
+
+    results: list[dict[str, Any]] = []
+    for group_index, plan in enumerate(plans):
+        color = palette[group_index]
+        for species_id in plan.species_ids:
+            geometry_index = species_to_index.get(int(species_id))
+            if geometry_index is None:
+                raise ForestControlError(f"Plant Group species ID is missing from Geometry List: {species_id}")
+            target = [float(color[0]), float(color[1]), float(color[2])]
+            response = service.set_array_element(
+                forest_name, "coloridlist", geometry_index, target, preflight=False
+            )
+            readback = service.get_array_element(
+                forest_name, "coloridlist", geometry_index, preflight=False
+            ).get("value")
+            if isinstance(readback, (list, tuple)):
+                actual = [int(round(float(v))) for v in readback[:3]]
+            else:
+                text = str(readback or "").strip().strip("[]")
+                try:
+                    actual = [int(round(float(v.strip()))) for v in text.split(",")[:3]]
+                except Exception:
+                    actual = []
+            expected = list(color)
+            if actual != expected:
+                raise ForestControlError(
+                    f"Plant-group Color ID verification failed: species={species_id} "
+                    f"expected={expected} actual={actual}"
+                )
+            results.append({
+                "group_id": plan.group_id,
+                "species_id": int(species_id),
+                "geometry_index": int(geometry_index),
+                "color_id": expected,
+                "verified": response.get("verified") is True,
+            })
+    return results
 
 def _resolve_diversity_mask_paths(
     manifest: Mapping[str, Any],
@@ -358,30 +690,28 @@ def _resolve_diversity_mask_paths(
     """
     raw_groups = manifest.get("groups") if isinstance(manifest, Mapping) else None
     groups = [item for item in (raw_groups or []) if isinstance(item, Mapping)]
-    if len(groups) < 3:
-        raise ForestControlError("Single-Forest diversity map requires three Plant Group records.")
+    if not groups:
+        raise ForestControlError("Single-Forest diversity map requires Plant Group records.")
 
+    authored_tokens = [str(group.get("zone_mask_path") or "").strip() for group in groups]
+    authored_present = any(authored_tokens)
     authored_paths: list[Path] = []
-    authored_present = False
-    for group in groups[:3]:
-        raw_path = str(group.get("zone_mask_path") or "").strip()
-        if raw_path:
-            authored_present = True
-            authored_paths.append(Path(raw_path).expanduser().resolve())
-        else:
-            authored_paths.append(Path())
 
     if authored_present:
-        if any(not str(group.get("zone_mask_path") or "").strip() for group in groups[:3]):
+        if any(not token for token in authored_tokens):
             raise ForestControlError(
-                "Stage 8 visual-intent manifest must provide zone_mask_path for all three Plant Groups."
+                "Stage 8 visual-intent manifest must provide zone_mask_path for every Plant Group."
             )
+        authored_paths = [Path(token).expanduser().resolve() for token in authored_tokens]
         missing = [str(path) for path in authored_paths if not path.is_file()]
         if missing:
             raise ForestControlError(
                 "Stage 8 reference-image zone masks were not found: " + ", ".join(missing)
             )
-        return authored_paths, "manifest_zone_masks"
+        return authored_paths, "line_site_polygon_semantic_layout"
+
+    if len(groups) < 3:
+        raise ForestControlError("Legacy single-Forest diversity map requires three Plant Group records.")
 
     project_root = Path(__file__).resolve().parents[3]
     mask_dir = project_root / "resources" / "generated_masks" / "stage5d18"
@@ -400,6 +730,7 @@ def _build_single_forest_diversity_map(
     target_width_system: float | None = None,
     target_height_system: float | None = None,
     reference_tile_system: float | None = None,
+    site_polygon_normalized: list[tuple[float, float]] | None = None,
 ) -> Path:
     project_root = Path(__file__).resolve().parents[3]
     mask_dir = project_root / "resources" / "generated_masks" / "stage5d18"
@@ -427,35 +758,60 @@ def _build_single_forest_diversity_map(
         if any(image.size != size for image in sources[1:] + shaped):
             raise ForestControlError("Species distribution masks do not have matching dimensions.")
         shares = _normalized_species_shares(sources, groups)
-        rgb = _exclusive_normalized_rgb(sources, shaped, shares)
-        paletted = None
+        authored_photo = _mask_source in {"manifest_zone_masks", "reference_photo_semantic_layout", "line_site_semantic_layout", "line_site_polygon_semantic_layout"}
+        if (
+            target_width_system is not None
+            and target_height_system is not None
+            and reference_tile_system is not None
+            and target_width_system > 0.0
+            and target_height_system > 0.0
+            and reference_tile_system > 0.0
+        ):
+            src_w, src_h = sources[0].size
+            dst_w = max(32, min(2048, int(round(src_w * float(target_width_system) / float(reference_tile_system)))))
+            dst_h = max(32, min(2048, int(round(src_h * float(target_height_system) / float(reference_tile_system)))))
+        else:
+            dst_w, dst_h = sources[0].size
+
+        final_image = None
+        rgb = None
         resized = None
         try:
-            paletted = _paletteize_exclusive_rgb(rgb)
-            final_image = paletted
-            if (
-                target_width_system is not None
-                and target_height_system is not None
-                and reference_tile_system is not None
-                and target_width_system > 0.0
-                and target_height_system > 0.0
-                and reference_tile_system > 0.0
-            ):
-                src_w, src_h = paletted.size
-                dst_w = max(16, min(2048, int(round(src_w * float(target_width_system) / float(reference_tile_system)))))
-                dst_h = max(16, min(2048, int(round(src_h * float(target_height_system) / float(reference_tile_system)))))
-                if (dst_w, dst_h) != paletted.size:
-                    resized = paletted.resize((dst_w, dst_h), resample=Image.Resampling.NEAREST)
+            if authored_photo:
+                if not site_polygon_normalized:
+                    raise ForestControlError(
+                        "Stage 8 Line-site map requires the sampled 3ds Max planting spline."
+                    )
+                final_image = _reference_photo_semantic_layout(
+                    sources,
+                    groups,
+                    shares,
+                    size=(dst_w, dst_h),
+                    site_polygon_normalized=site_polygon_normalized,
+                )
+            else:
+                rgb = _exclusive_normalized_rgb(sources, shaped, shares)
+                final_image = rgb
+                if (dst_w, dst_h) != rgb.size:
+                    resized = rgb.resize((dst_w, dst_h), resample=Image.Resampling.NEAREST)
                     final_image = resized
+                final_image = _ensure_minimum_species_footprints(
+                    final_image,
+                    sources,
+                    groups,
+                    target_width_system=target_width_system,
+                    target_height_system=target_height_system,
+                )
             output_path = mask_dir / "FM_SingleForest_Diversity_Map.png"
             final_image.save(output_path, format="PNG", optimize=False)
             return output_path
         finally:
             if resized is not None:
                 resized.close()
-            if paletted is not None:
-                paletted.close()
-            rgb.close()
+            if rgb is not None:
+                rgb.close()
+            if final_image is not None and final_image is not rgb and final_image is not resized:
+                final_image.close()
     finally:
         for image in sources + shaped:
             try:
@@ -476,15 +832,17 @@ def refresh_plant_group_diversity_map(manifest: Mapping[str, Any]) -> dict[str, 
     """Interactive UI path: rebuild only the RGB diversity map and rebind it once."""
     forest_name = str(manifest.get("primary_forest") or "FM_Forest_001")
     bounds = get_single_forest_area_bounds(forest_name)
+    site_polygon = _get_single_forest_site_polygon(forest_name)
     # Keep the original 75 m mask calibration. current_units_x/y are live
     # Forest Pack map projection values and must never be reinterpreted as
     # Plant Spacing. Using them here creates a feedback loop after every Apply.
     reference_tile = _authored_mask_reference_system(ForestPackControlService())
     diversity_map_path = _build_single_forest_diversity_map(
         manifest,
-        target_width_system=float(bounds.get("width_system") or 0.0),
-        target_height_system=float(bounds.get("height_system") or 0.0),
+        target_width_system=float(site_polygon.get("width_system") or bounds.get("width_system") or 0.0),
+        target_height_system=float(site_polygon.get("height_system") or bounds.get("height_system") or 0.0),
         reference_tile_system=reference_tile,
+        site_polygon_normalized=list(site_polygon.get("points_normalized") or []),
     )
     map_binding = refresh_single_forest_diversity_map(forest_name, diversity_map_path)
     return {
@@ -615,6 +973,166 @@ def refresh_plant_group_distribution_fast(
         "verified": bool(collision_results) and all(item.get("verified") for item in collision_results),
     }
 
+def _set_array_bool(forest_name: str, property_name: str, zero_index: int, value: bool) -> dict[str, Any]:
+    def enc(text: str) -> str:
+        return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+    command = "|".join((
+        "FOREST_CONTROL_SET_ARRAY_SCALAR",
+        enc(forest_name),
+        enc(property_name),
+        str(int(zero_index)),
+        "bool",
+        enc("true" if value else "false"),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise ForestControlError(f"Forest Area activation write failed: {property_name}[{zero_index}] {response}")
+    data = response.get("data") or {}
+    if data.get("verified") is not True or bool(data.get("after_value")) is not bool(value):
+        raise ForestControlError(f"Forest Area activation verification failed: {property_name}[{zero_index}]")
+    return data
+
+
+def _set_array_int(forest_name: str, property_name: str, zero_index: int, value: int) -> dict[str, Any]:
+    def enc(text: str) -> str:
+        return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+    command = "|".join((
+        "FOREST_CONTROL_SET_ARRAY_SCALAR",
+        enc(forest_name),
+        enc(property_name),
+        str(int(zero_index)),
+        "int",
+        enc(str(int(value))),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise ForestControlError(
+            f"Forest Area normalization write failed: {property_name}[{zero_index}]={value} {response}"
+        )
+    data = response.get("data") or {}
+    try:
+        actual = int(data.get("after_value"))
+    except (TypeError, ValueError):
+        actual = None
+    if data.get("verified") is not True or actual != int(value):
+        raise ForestControlError(
+            f"Forest Area normalization verification failed: {property_name}[{zero_index}] "
+            f"expected={value} actual={data.get('after_value')}"
+        )
+    return data
+
+
+def _set_array_float(forest_name: str, property_name: str, zero_index: int, value: float) -> dict[str, Any]:
+    def enc(text: str) -> str:
+        return base64.b64encode(text.encode("utf-8")).decode("ascii")
+
+    expected = float(value)
+    command = "|".join((
+        "FOREST_CONTROL_SET_ARRAY_SCALAR",
+        enc(forest_name),
+        enc(property_name),
+        str(int(zero_index)),
+        "float",
+        enc(repr(expected)),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise ForestControlError(
+            f"Forest Area normalization write failed: {property_name}[{zero_index}]={expected} {response}"
+        )
+    data = response.get("data") or {}
+    try:
+        actual = float(data.get("after_value"))
+    except (TypeError, ValueError):
+        actual = None
+    if data.get("verified") is not True or actual is None or abs(actual - expected) > 1e-6:
+        raise ForestControlError(
+            f"Forest Area normalization verification failed: {property_name}[{zero_index}] "
+            f"expected={expected} actual={data.get('after_value')}"
+        )
+    return data
+
+
+def _normalize_requested_spline_areas(
+    forest_name: str,
+    requested_zero_indices: list[int],
+) -> dict[str, Any]:
+    """Force requested Stage 8 base Areas to Forest Pack spline/include semantics.
+
+    A stale Area record can still reference the correct Line node while carrying
+    a non-spline or exclude mode. In that state the UI looks correctly linked
+    but Forest Pack does not clip generated items to the intended boundary.
+    """
+    requested = sorted({int(i) for i in requested_zero_indices})
+    if not requested:
+        raise ForestControlError("Stage 8 Area normalization received no requested base Area indices.")
+
+    records: list[dict[str, Any]] = []
+    for zero_index in requested:
+        area_type = _set_array_int(forest_name, "artypelist", zero_index, 0)
+        include_mode = _set_array_int(forest_name, "arincexclist", zero_index, 0)
+        obstacle_scale = _set_array_float(forest_name, "arobscalelist", zero_index, 100.0)
+        records.append({
+            "zero_index": zero_index,
+            "area_type": int(area_type.get("after_value")),
+            "include_exclude": int(include_mode.get("after_value")),
+            "obstacle_scale": float(obstacle_scale.get("after_value")),
+            "verified": True,
+        })
+    return {
+        "requested_zero_indices": requested,
+        "records": records,
+        "verified": all(item.get("verified") is True for item in records),
+    }
+
+
+def _enforce_only_requested_base_areas_active(
+    forest_name: str,
+    requested_zero_indices: list[int],
+    service: ForestPackControlService,
+) -> dict[str, Any]:
+    inventory = service.inventory(forest_name, preflight=False)
+    prop = next(
+        (item for item in inventory.get("properties") or []
+         if isinstance(item, dict) and item.get("name") == "pf_aractivelist"),
+        None,
+    )
+    metadata = prop.get("array_metadata") if isinstance(prop, dict) else None
+    count = int((metadata or {}).get("count") or 0) if isinstance(metadata, dict) else 0
+    if count <= 0:
+        raise ForestControlError("Forest Pack pf_aractivelist is unavailable for Stage 8 Area enforcement.")
+
+    requested = {int(i) for i in requested_zero_indices}
+    if not requested:
+        raise ForestControlError("Stage 8 Area enforcement received no requested base Area indices.")
+    if any(i < 0 or i >= count for i in requested):
+        raise ForestControlError(f"Stage 8 requested Area index is out of range: requested={sorted(requested)} count={count}")
+
+    writes: list[dict[str, Any]] = []
+    for zero_index in range(count):
+        writes.append(_set_array_bool(
+            forest_name,
+            "pf_aractivelist",
+            zero_index,
+            zero_index in requested,
+        ))
+
+    active = [int(item.get("index")) for item in writes if item.get("after_value") is True]
+    if active != sorted(requested):
+        raise ForestControlError(
+            f"Stage 8 active Area set mismatch: expected={sorted(requested)} actual={active}"
+        )
+    return {
+        "area_count": count,
+        "requested_active_zero_indices": sorted(requested),
+        "active_zero_indices": active,
+        "disabled_zero_indices": [i for i in range(count) if i not in requested],
+        "verified": True,
+    }
+
+
 def execute_plant_group_manifest(
     manifest: Mapping[str, Any],
     *,
@@ -646,29 +1164,108 @@ def execute_plant_group_manifest(
                 plan.scale_percent,
             )
         )
+    requested_base_area_indices = sorted({plan.base_area_index for plan in plans})
     finalize = finalize_plant_group_areas(
         forest_name,
-        sorted({plan.base_area_index for plan in plans}),
+        requested_base_area_indices,
         [plan.group_key for plan in plans],
+    )
+    area_activation = _enforce_only_requested_base_areas_active(
+        forest_name,
+        requested_base_area_indices,
+        svc,
+    )
+    area_normalization = _normalize_requested_spline_areas(
+        forest_name,
+        requested_base_area_indices,
     )
     # Restore the final Geometry collision/spacing state before map acceptance.
     # Running a strict generated-item scan before this step can falsely reject a
     # valid reset when a previous edit left one species with a large radius.
     collision_results = _apply_species_spacing_collision(manifest, forest_name, plans, svc)
-    bounds = get_single_forest_area_bounds(forest_name)
-    reference_tile = _authored_mask_reference_system(svc)
-    diversity_map_path = _build_single_forest_diversity_map(
-        manifest,
-        target_width_system=float(bounds.get("width_system") or 0.0),
-        target_height_system=float(bounds.get("height_system") or 0.0),
-        reference_tile_system=reference_tile,
+    color_id_results: list[dict[str, Any]] = []
+
+    # Stage 8 temporary map-free execution. The diversity bitmap pipeline is
+    # intentionally disabled until its scene-space mapping is redesigned.
+    # Forest Pack stays in the random diversity mode established by
+    # finalize_plant_group_areas(), and Line001 remains the only active Area.
+    # No bitmap is generated, assigned, refreshed, or used as a density map.
+    distribution_threshold = {
+        "applied": False,
+        "reason": "map_pipeline_deferred",
+        "verified": True,
+    }
+    encoded_forest = base64.b64encode(forest_name.encode("utf-8")).decode("ascii")
+    encoded_property = base64.b64encode(b"distmap").decode("ascii")
+    clear_response = send_command(
+        f"FOREST_CONTROL_SET_TEXTURE_REF|{encoded_forest}|{encoded_property}|null|WA=="
     )
-    map_binding = bind_single_forest_diversity_map(
+    if clear_response.get("ok") is not True:
+        raise ForestControlError(f"Could not clear Forest distribution map: {clear_response}")
+    clear_data = clear_response.get("data") or {}
+    if clear_data.get("verified") is not True or clear_data.get("after_value") is not None:
+        raise ForestControlError(f"Forest distribution map clear did not verify: {clear_response}")
+
+    density_write = svc.set_property(forest_name, "densityMap", False, preflight=False)
+    diversity_write = svc.set_property(forest_name, "divers", 0, preflight=False)
+
+    # The bridge's geometry append path temporarily writes 45000.0 to
+    # Forest Pack units_x/units_y. In the verified Stage 8 runs the final
+    # distribution extents matched the active Line001 bounds instead
+    # (for ref02: 1861.07 x 560.73 system units). Restore those scene-space
+    # extents after all geometry mutations so map-free distribution does not
+    # collapse to a single item.
+    area_bounds = get_single_forest_area_bounds(forest_name)
+    target_units_x = float(area_bounds.get("width_system") or 0.0)
+    target_units_y = float(area_bounds.get("height_system") or area_bounds.get("depth_system") or 0.0)
+    if target_units_x <= 0.0 or target_units_y <= 0.0:
+        raise ForestControlError(f"Could not resolve active Forest Area bounds for map-free distribution: {area_bounds}")
+    units_x_write = svc.set_property(forest_name, "units_x", target_units_x, preflight=False)
+    units_y_write = svc.set_property(forest_name, "units_y", target_units_y, preflight=False)
+    if units_x_write.get("verified") is not True or units_y_write.get("verified") is not True:
+        raise ForestControlError(
+            f"Map-free Forest distribution extent write did not verify: "
+            f"units_x={units_x_write} units_y={units_y_write}"
+        )
+
+    # Re-finalize only after the authoritative active-Area extents are in place.
+    # The first finalize above establishes species selection/diversity; this second
+    # readback/update makes the returned generated-item counts describe the same
+    # final Forest state that diagnostics sees later in the acceptance pipeline.
+    finalize = finalize_plant_group_areas(
         forest_name,
-        diversity_map_path,
-        strict_verify=bool(strict_acceptance),
+        requested_base_area_indices,
+        [plan.group_key for plan in plans],
     )
-    map_source_paths, map_source_kind = _resolve_diversity_mask_paths(manifest)
+
+    map_binding = {
+        "enabled": False,
+        "forest_name": forest_name,
+        "map_path": "",
+        "distmap_cleared": True,
+        "density_map": density_write.get("after_value"),
+        "diversity_mode": "random",
+        "diversity_value": diversity_write.get("after_value"),
+        "reason": "map_pipeline_deferred",
+        "verified": (
+            density_write.get("verified") is True
+            and diversity_write.get("verified") is True
+            and density_write.get("after_value") is False
+            and int(diversity_write.get("after_value") or 0) == 0
+        ),
+    }
+    map_source_paths: list[Path] = []
+    map_source_kind = "disabled_map_free"
+    site_polygon = {}
+
+    # Remove the obsolete generated Stage 8 diversity bitmap if it exists so
+    # a previous run cannot be mistaken for the active runtime source.
+    legacy_map = Path(__file__).resolve().parents[3] / "resources" / "generated_masks" / "stage5d18" / "FM_SingleForest_Diversity_Map.png"
+    try:
+        if legacy_map.exists():
+            legacy_map.unlink()
+    except OSError as exc:
+        raise ForestControlError(f"Could not remove legacy Stage 8 diversity map: {legacy_map}: {exc}") from exc
     return {
         "forest_name": forest_name,
         "base_spacing_system": baseline_grid,
@@ -684,10 +1281,33 @@ def execute_plant_group_manifest(
         ],
         "area_results": area_results,
         "finalize": finalize,
+        "area_activation": area_activation,
+        "area_normalization": area_normalization,
+        "distribution_threshold": distribution_threshold,
         "map_binding": map_binding,
+        "map_free_distribution_extents": {
+            "units_x": float(units_x_write.get("after_value") or target_units_x),
+            "units_y": float(units_y_write.get("after_value") or target_units_y),
+            "source": "active_area_bounds",
+            "verified": True,
+        },
         "map_source_kind": map_source_kind,
         "map_source_paths": [str(path) for path in map_source_paths],
+        "site_polygon": {
+            "spline_name": site_polygon.get("spline_name"),
+            "sample_count": site_polygon.get("sample_count"),
+            "width_system": site_polygon.get("width_system"),
+            "height_system": site_polygon.get("height_system"),
+            "verified": site_polygon.get("verified") is True,
+        },
         "spacing_mode": "per_species_collision_radius",
         "collision_results": collision_results,
-        "verified": bool(finalize.get("verified")) and bool(map_binding.get("verified")) and all(item.get("verified") for item in collision_results),
+        "color_id_results": color_id_results,
+        "verified": (
+            bool(finalize.get("verified"))
+            and bool(area_activation.get("verified"))
+            and bool(area_normalization.get("verified"))
+            and bool(map_binding.get("verified"))
+            and all(item.get("verified") for item in collision_results)
+        ),
     }

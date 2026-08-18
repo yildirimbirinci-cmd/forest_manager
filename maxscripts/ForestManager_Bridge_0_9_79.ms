@@ -1,4 +1,4 @@
-﻿/*
+/*
     Forest Manager - 3ds Max 2020 Bridge
     Stage 2: PING, selection inspection, Forest Pack detection,
              and verified Forest creation from one closed spline.
@@ -8021,10 +8021,11 @@ struct ForestManagerBridgeState
         try (coords = bitmapMap.coords) catch (coords = undefined)
         if coords == undefined do throw "Single-Forest diversity Bitmaptexture coords are unavailable."
         normalizeSpeciesDensityMapCoords coords
-        -- This map represents one site image, not a repeating texture.  Tiling can
-        -- make a valid colour region appear again at unrelated scene positions.
-        coords.U_Tile = false
-        coords.V_Tile = false
+        -- Forest Pack Image Mode uses tiled distribution images in scene space.
+        -- Keep tiling enabled; the Line001 inclusion Area remains the authoritative
+        -- perimeter, while the color map controls species selection inside it.
+        coords.U_Tile = true
+        coords.V_Tile = true
 
         local splineNode = findForestAreaSpline forestNode
         if splineNode == undefined do throw "Single-Forest diversity map area spline was not found."
@@ -8177,6 +8178,51 @@ struct ForestManagerBridgeState
         ",\"center_y_system\":" + (((pmin.y + pmax.y) * 0.5) as string) +
         ",\"current_units_x\":" + ((if isProperty forestNode #units_x then forestNode.units_x else 0.0) as string) +
         ",\"current_units_y\":" + ((if isProperty forestNode #units_y then forestNode.units_y else 0.0) as string) +
+        ",\"verified\":true}"
+    ),
+
+    fn singleForestAreaPolygonJson forestName sampleCount =
+    (
+        local forestNode = findForestControlNode forestName
+        if forestNode == undefined do throw "Single-Forest area-polygon target was not found."
+        local splineNode = findForestAreaSpline forestNode
+        if splineNode == undefined do throw "Single-Forest area spline was not found."
+        if superClassOf splineNode != Shape do throw "Single-Forest area node is not a Shape."
+        local count = amax 64 (amin 1024 sampleCount)
+        local points = #()
+        local minX = undefined
+        local minY = undefined
+        local maxX = undefined
+        local maxY = undefined
+        resetLengthInterp()
+        for i = 0 to (count - 1) do
+        (
+            local t = (i as float) / (count as float)
+            local p = in coordsys world (lengthInterp splineNode 1 t steps:200)
+            append points p
+            if minX == undefined or p.x < minX do minX = p.x
+            if minY == undefined or p.y < minY do minY = p.y
+            if maxX == undefined or p.x > maxX do maxX = p.x
+            if maxY == undefined or p.y > maxY do maxY = p.y
+        )
+        if points.count < 3 do throw "Single-Forest area polygon sampling produced fewer than three points."
+        if minX == undefined or minY == undefined or maxX == undefined or maxY == undefined do throw "Single-Forest area polygon bounds are invalid."
+        if (maxX - minX) <= 0.0 or (maxY - minY) <= 0.0 do throw "Single-Forest area polygon has zero-size XY bounds."
+        local pointsJson = "["
+        for i = 1 to points.count do
+        (
+            if i > 1 do pointsJson += ","
+            pointsJson += "[" + (points[i].x as string) + "," + (points[i].y as string) + "]"
+        )
+        pointsJson += "]"
+        "{\"forest_name\":" + (jsonString forestNode.name) +
+        ",\"spline_name\":" + (jsonString splineNode.name) +
+        ",\"sample_count\":" + (points.count as string) +
+        ",\"min_x_system\":" + (minX as string) +
+        ",\"min_y_system\":" + (minY as string) +
+        ",\"max_x_system\":" + (maxX as string) +
+        ",\"max_y_system\":" + (maxY as string) +
+        ",\"points\":" + pointsJson +
         ",\"verified\":true}"
     ),
 
@@ -8474,6 +8520,22 @@ struct ForestManagerBridgeState
             catch
             (
                 return makeError "FM_SINGLE_FOREST_AREA_BOUNDS" (getCurrentException())
+            )
+        )
+
+        if matchPattern command pattern:"FM_SINGLE_FOREST_AREA_POLYGON|*" ignoreCase:true then
+        (
+            try
+            (
+                local parts = filterString cleanCommand "|"
+                if parts.count != 3 do throw "FM_SINGLE_FOREST_AREA_POLYGON requires forest name and sample count."
+                local forestName = decodeBase64Utf8 parts[2]
+                local sampleCount = parts[3] as integer
+                return "{\"ok\":true,\"command\":\"FM_SINGLE_FOREST_AREA_POLYGON\",\"data\":" + singleForestAreaPolygonJson forestName sampleCount + ",\"error\":\"\"}"
+            )
+            catch
+            (
+                return makeError "FM_SINGLE_FOREST_AREA_POLYGON" (getCurrentException())
             )
         )
 
