@@ -27,6 +27,8 @@ class ReferenceImageAnalysis:
     height: int
     zones: tuple[ReferenceZoneIntent, ...]
     analysis_version: str = "stage8-reference-image-v1"
+    analysis_provider: str = "deterministic_fallback"
+    analysis_model: str = ""
 
     @property
     def coverage_total(self) -> float:
@@ -120,6 +122,20 @@ class ReferenceImageAnalyzer:
             height=int(height),
             zones=normalized,
             analysis_version="stage8-reference-image-variable-groups-v2",
+        )
+
+
+    def analyze_with_provider(self, image_path: str, provider: Any) -> ReferenceImageAnalysis:
+        result = provider.analyze(image_path)
+        analysis = self.from_group_intents(image_path, list(result.groups))
+        return ReferenceImageAnalysis(
+            image_path=analysis.image_path,
+            width=analysis.width,
+            height=analysis.height,
+            zones=analysis.zones,
+            analysis_version=analysis.analysis_version,
+            analysis_provider=str(result.provider),
+            analysis_model=str(result.model),
         )
 
     def analyze(self, image_path: str, *, output_dir: str | None = None) -> ReferenceImageAnalysis:
@@ -257,6 +273,8 @@ class ReferenceImageAnalyzer:
             "width": analysis.width,
             "height": analysis.height,
             "analysis_version": analysis.analysis_version,
+            "analysis_provider": analysis.analysis_provider,
+            "analysis_model": analysis.analysis_model,
             "coverage_total": analysis.coverage_total,
             "zones": [
                 {
