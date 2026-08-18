@@ -10,12 +10,6 @@ from forest_manager.forest_control.plant_group_execution import (
     refresh_plant_group_distribution_fast,
     refresh_plant_group_diversity_map,
 )
-from forest_manager.max_bridge.runtime_bridge import (
-    apply_plant_group_species_runtime,
-    get_single_forest_area_bounds,
-    read_plant_group_manifest,
-    write_plant_group_manifest,
-)
 from forest_manager.forest_control.semantic_transaction import (
     UnifiedControlOperation,
     UnifiedControlTransactionManager,
@@ -203,7 +197,7 @@ class ForestManagerUIController:
         current_extent = 0.0
         try:
             forest_name = self._state.selected_forest or "FM_Forest_001"
-            bounds = get_single_forest_area_bounds(forest_name)
+            bounds = self.service.single_forest_area_bounds(forest_name, preflight=False)
             current_extent = min(
                 float(bounds.get("width_system") or 0.0),
                 float(bounds.get("height_system") or 0.0),
@@ -395,7 +389,7 @@ class ForestManagerUIController:
             raise ForestControlError(f"Forest target became stale while loading UI state: {forest_name}")
         self._pending.clear()
         try:
-            group_manifest = read_plant_group_manifest()
+            group_manifest = self.service.read_plant_group_manifest(preflight=False)
         except Exception:
             group_manifest = {}
         groups = discover_plant_groups(forests, group_manifest)
@@ -429,7 +423,7 @@ class ForestManagerUIController:
         )
         synced_manifest, manifest_changed = self._synchronize_group_manifest_from_scene(group_manifest)
         if manifest_changed:
-            write_result = write_plant_group_manifest(synced_manifest)
+            write_result = self.service.write_plant_group_manifest(synced_manifest, preflight=False)
             if write_result.get("verified") is True:
                 groups = discover_plant_groups(forests, synced_manifest)
                 self._prime_group_runtime_cache(synced_manifest, groups)
@@ -773,7 +767,7 @@ class ForestManagerUIController:
 
 
     def _manifest_group_payload(self, group: PlantGroupTarget) -> dict[str, Any]:
-        manifest = read_plant_group_manifest()
+        manifest = self.service.read_plant_group_manifest(preflight=False)
         raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
         if not isinstance(raw_groups, list):
             raise ForestControlError("Plant-group manifest is missing or invalid.")
@@ -903,7 +897,7 @@ class ForestManagerUIController:
         return self._state
 
     def _persist_group_runtime_value(self, group: PlantGroupTarget, field: str, value: Any) -> None:
-        manifest = read_plant_group_manifest()
+        manifest = self.service.read_plant_group_manifest(preflight=False)
         raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
         if not isinstance(raw_groups, list):
             raise ForestControlError("Plant-group manifest is missing or invalid.")
@@ -923,7 +917,7 @@ class ForestManagerUIController:
             "probability": "species_probability_percent",
         }[field]
         artist_values[key] = value
-        result = write_plant_group_manifest(manifest)
+        result = self.service.write_plant_group_manifest(manifest, preflight=False)
         if result.get("verified") is not True:
             raise ForestControlError("Plant-group live setting write was not verified.")
 
@@ -952,7 +946,7 @@ class ForestManagerUIController:
         else:
             raise ForestControlError(f"Unsupported live Plant Group field: {field}")
 
-        result = apply_plant_group_species_runtime(group.forest_name, species_ids, **kwargs)
+        result = self.service.apply_plant_group_species_runtime(group.forest_name, species_ids, preflight=False, **kwargs)
         if result.get("verified") is not True:
             raise ForestControlError(f"Plant Group live {field} update was not verified.")
         self._persist_group_runtime_value(group, field, value)
@@ -1044,7 +1038,7 @@ class ForestManagerUIController:
         return next((item for item in self._state.plant_groups if item.group_id == group_id), None)
 
     def _persist_group_artist_control(self, group: PlantGroupTarget, key: str, value: Any) -> ForestUIState:
-        manifest = read_plant_group_manifest()
+        manifest = self.service.read_plant_group_manifest(preflight=False)
         raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
         if not isinstance(raw_groups, list):
             raise ForestControlError("Plant-group manifest is missing or invalid.")
@@ -1062,8 +1056,8 @@ class ForestManagerUIController:
         if key == "density_spacing":
             raw_spacing = self._display_distance_to_system(value, self._state.scene_units)
             target["spacing_system"] = [raw_spacing, raw_spacing]
-        previous_manifest = read_plant_group_manifest()
-        write_result = write_plant_group_manifest(manifest)
+        previous_manifest = self.service.read_plant_group_manifest(preflight=False)
+        write_result = self.service.write_plant_group_manifest(manifest, preflight=False)
         if write_result.get("verified") is not True:
             raise ForestControlError("Plant-group artist setting write was not verified.")
         if key == "density_spacing":
@@ -1072,9 +1066,9 @@ class ForestManagerUIController:
                 if execution.get("verified") is not True:
                     raise ForestControlError("Plant-group distribution execution was not verified.")
             except Exception:
-                write_plant_group_manifest(previous_manifest)
+                self.service.write_plant_group_manifest(previous_manifest, preflight=False)
                 raise
-        readback = read_plant_group_manifest()
+        readback = self.service.read_plant_group_manifest(preflight=False)
         readback_groups = readback.get("groups") if isinstance(readback, dict) else None
         readback_target = next(
             (item for item in (readback_groups or []) if isinstance(item, dict) and str(item.get("group_id") or "") == group.group_id),
@@ -1321,7 +1315,7 @@ class ForestManagerUIController:
             forest_name = self._state.selected_forest
             if not forest_name:
                 raise ForestControlError("No Forest selected.")
-            manifest = read_plant_group_manifest()
+            manifest = self.service.read_plant_group_manifest(preflight=False)
             raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
             if not isinstance(raw_groups, list) or not raw_groups:
                 raise ForestControlError("Plant-group manifest is missing or invalid.")
@@ -1362,7 +1356,7 @@ class ForestManagerUIController:
 
             if set(touched_ids) != set(target_ids):
                 raise ForestControlError("One or more Plant Groups became stale before Reset.")
-            write_result = write_plant_group_manifest(manifest)
+            write_result = self.service.write_plant_group_manifest(manifest, preflight=False)
             if write_result.get("verified") is not True:
                 raise ForestControlError("Reset manifest write was not verified.")
 
@@ -1393,11 +1387,12 @@ class ForestManagerUIController:
                         species_ids.append(value)
                 if not species_ids:
                     raise ForestControlError(f"Plant Group species IDs could not be resolved during Reset: {group_id}")
-                apply_plant_group_species_runtime(
+                self.service.apply_plant_group_species_runtime(
                     group.forest_name,
                     species_ids,
                     enabled=bool((default_artist or {}).get("species_enabled", True)),
                     scale_percent=float((default_artist or {}).get("species_scale_percent", 100.0)),
+                    preflight=False,
                 )
 
             self._pending.clear()
@@ -1438,8 +1433,8 @@ class ForestManagerUIController:
             group_edits = [edit for edit in self._pending.values() if edit.property_name.startswith("__plant_group__|")]
             forest_edits = [edit for edit in self._pending.values() if not edit.property_name.startswith("__plant_group__|")]
             applied_count = 0
-            previous_manifest = read_plant_group_manifest() if group_edits else None
-            manifest = read_plant_group_manifest() if group_edits else None
+            previous_manifest = self.service.read_plant_group_manifest(preflight=False) if group_edits else None
+            manifest = self.service.read_plant_group_manifest(preflight=False) if group_edits else None
             raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
             if group_edits and not isinstance(raw_groups, list):
                 raise ForestControlError("Plant-group manifest is missing or invalid.")
@@ -1481,7 +1476,7 @@ class ForestManagerUIController:
                     applied_count += 1
 
                 if group_edits:
-                    write_result = write_plant_group_manifest(manifest)
+                    write_result = self.service.write_plant_group_manifest(manifest, preflight=False)
                     if write_result.get("verified") is not True:
                         raise ForestControlError("Plant-group pending settings were not persisted.")
 
@@ -1530,7 +1525,7 @@ class ForestManagerUIController:
                         species_ids = [value for value in species_ids if value > 0]
                         if not species_ids:
                             raise ForestControlError(f"Plant Group species IDs could not be resolved: {group_id}")
-                        apply_plant_group_species_runtime(group.forest_name, species_ids, **values)
+                        self.service.apply_plant_group_species_runtime(group.forest_name, species_ids, preflight=False, **values)
 
                 if forest_edits:
                     operations = tuple(
@@ -1546,7 +1541,7 @@ class ForestManagerUIController:
             except Exception:
                 if previous_manifest is not None:
                     try:
-                        write_plant_group_manifest(previous_manifest)
+                        self.service.write_plant_group_manifest(previous_manifest, preflight=False)
                     except Exception:
                         pass
                 for edit, group in reversed(applied_group_edits):

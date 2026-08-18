@@ -6,7 +6,14 @@ from dataclasses import dataclass
 import math
 from typing import Any
 
-from forest_manager.max_bridge.runtime_bridge import ensure_current_bridge, send_command
+from forest_manager.max_bridge.runtime_bridge import (
+    apply_plant_group_species_runtime as _apply_plant_group_species_runtime,
+    ensure_current_bridge,
+    get_single_forest_area_bounds as _get_single_forest_area_bounds,
+    read_plant_group_manifest as _read_plant_group_manifest,
+    send_command,
+    write_plant_group_manifest as _write_plant_group_manifest,
+)
 
 
 class ForestControlError(RuntimeError):
@@ -1003,6 +1010,74 @@ class ForestPackControlService(ForestControlService):
                 f"Selected 3ds Max object is not a discovered Forest: {selected_name} class={selected_class}"
             )
         return selected_name
+
+    def read_plant_group_manifest(self, *, preflight: bool = True) -> dict[str, Any]:
+        if preflight:
+            ensure_current_bridge()
+        data = _read_plant_group_manifest()
+        if not isinstance(data, dict):
+            raise ForestControlError("Plant-group manifest read returned an invalid payload.")
+        return data
+
+    def write_plant_group_manifest(
+        self,
+        manifest: dict[str, Any],
+        *,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        if not isinstance(manifest, dict):
+            raise ForestControlError("Plant-group manifest must be a dictionary.")
+        if preflight:
+            ensure_current_bridge()
+        data = _write_plant_group_manifest(manifest)
+        if data.get("verified") is not True:
+            raise ForestControlError("Plant-group manifest write was not verified.")
+        return data
+
+    def single_forest_area_bounds(
+        self,
+        forest_name: str,
+        *,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        forest = str(forest_name).strip()
+        if not forest:
+            raise ForestControlError("Forest name must be non-empty.")
+        if preflight:
+            ensure_current_bridge()
+        data = _get_single_forest_area_bounds(forest)
+        if data.get("verified") is not True:
+            raise ForestControlError("Single-Forest area bounds were not verified.")
+        return data
+
+    def apply_plant_group_species_runtime(
+        self,
+        forest_name: str,
+        species_ids: list[int],
+        *,
+        enabled: bool | None = None,
+        scale_percent: float | None = None,
+        probability_percent: float | None = None,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        forest = str(forest_name).strip()
+        ids = [int(value) for value in species_ids if int(value) > 0]
+        if not forest:
+            raise ForestControlError("Forest name must be non-empty.")
+        if not ids:
+            raise ForestControlError("At least one positive species ID is required.")
+        if preflight:
+            ensure_current_bridge()
+        data = _apply_plant_group_species_runtime(
+            forest,
+            ids,
+            enabled=enabled,
+            scale_percent=scale_percent,
+            probability_percent=probability_percent,
+        )
+        if data.get("verified") is not True:
+            raise ForestControlError("Plant-group species runtime update was not verified.")
+        return data
 
     def single_forest_area_polygon(
         self,
