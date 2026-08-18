@@ -334,12 +334,24 @@ class ForestManagerUIController:
         return manifest, changed
 
 
-    def _prime_group_runtime_cache(self, manifest: dict[str, Any], groups: tuple[PlantGroupTarget, ...]) -> None:
+    def _prime_group_runtime_cache(
+        self,
+        manifest: dict[str, Any],
+        groups: tuple[PlantGroupTarget, ...],
+        *,
+        scene_units: dict[str, Any] | None = None,
+    ) -> None:
         """Build lightweight Plant Group UI state from the already-loaded manifest.
 
         This cache is deliberately scene-read free.  The expensive live Forest Pack
         readback is reserved for Refresh Scene / Apply / Reset, not tree selection.
         """
+        # Cache contents are a projection of the currently loaded scene only.
+        # Always discard values from a previous scene/controller refresh before
+        # rebuilding from the authoritative manifest.
+        self._group_runtime_cache.clear()
+        units = scene_units if scene_units is not None else self._state.scene_units
+
         raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
         by_id = {
             str(item.get("group_id") or ""): item
@@ -355,7 +367,7 @@ class ForestManagerUIController:
             if isinstance(spacing_pair, (list, tuple)) and spacing_pair:
                 try:
                     spacing_display, spacing_suffix = self._system_distance_to_display(
-                        float(spacing_pair[0]), self._state.scene_units
+                        float(spacing_pair[0]), units
                     )
                 except Exception:
                     spacing_display = None
@@ -399,7 +411,8 @@ class ForestManagerUIController:
         except Exception:
             group_manifest = {}
         groups = discover_plant_groups(forests, group_manifest)
-        self._prime_group_runtime_cache(group_manifest, groups)
+        unit_payload = self._unit_payload(units)
+        self._prime_group_runtime_cache(group_manifest, groups, scene_units=unit_payload)
         group = None
         if selected_group_id:
             group = next((item for item in groups if item.group_id == selected_group_id), None)
@@ -415,9 +428,9 @@ class ForestManagerUIController:
             selected_group_label=group.label if group is not None else None,
             selected_forest=forest_name,
             properties=properties,
-            scene_units=self._unit_payload(units),
+            scene_units=unit_payload,
             pending_edits=(),
-            artist_controls=self._artist_control_states(properties, self._unit_payload(units), group),
+            artist_controls=self._artist_control_states(properties, unit_payload, group),
             selected_group_runtime=None,
             bridge_online=True,
             status=(
@@ -436,7 +449,7 @@ class ForestManagerUIController:
                 manifest_write_verified = False
             if manifest_write_verified:
                 groups = discover_plant_groups(forests, synced_manifest)
-                self._prime_group_runtime_cache(synced_manifest, groups)
+                self._prime_group_runtime_cache(synced_manifest, groups, scene_units=unit_payload)
                 group = next((item for item in groups if item.group_id == self._state.selected_group_id), None)
                 self._state = replace(
                     self._state,
@@ -1562,7 +1575,11 @@ class ForestManagerUIController:
             # stable.  Explicit Refresh Scene remains the path for scene readback.
             runtime = self._state.selected_group_runtime
             if group_edits and isinstance(manifest, dict):
-                self._prime_group_runtime_cache(manifest, tuple(refreshed_groups))
+                self._prime_group_runtime_cache(
+                    manifest,
+                    tuple(refreshed_groups),
+                    scene_units=self._state.scene_units,
+                )
             if selected_group is not None and selected_group.manifest_backed:
                 cached_runtime = dict(self._group_runtime_cache.get(selected_group.group_id) or {})
                 if cached_runtime:
