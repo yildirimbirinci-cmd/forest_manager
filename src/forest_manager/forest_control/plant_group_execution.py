@@ -1003,6 +1003,8 @@ def _set_array_float(
 def _normalize_requested_spline_areas(
     forest_name: str,
     requested_zero_indices: list[int],
+    *,
+    service: ForestPackControlService,
 ) -> dict[str, Any]:
     """Force requested Stage 8 base Areas to Forest Pack spline/include semantics.
 
@@ -1062,6 +1064,7 @@ def _enforce_only_requested_base_areas_active(
             "pf_aractivelist",
             zero_index,
             zero_index in requested,
+            service=service,
         ))
 
     active = [int(item.get("index")) for item in writes if item.get("after_value") is True]
@@ -1123,6 +1126,7 @@ def execute_plant_group_manifest(
     area_normalization = _normalize_requested_spline_areas(
         forest_name,
         requested_base_area_indices,
+        service=svc,
     )
     # Restore the final Geometry collision/spacing state before map acceptance.
     # Running a strict generated-item scan before this step can falsely reject a
