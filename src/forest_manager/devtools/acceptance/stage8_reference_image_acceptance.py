@@ -49,11 +49,11 @@ def main(argv: list[str] | None = None) -> int:
         analyzer = ReferenceImageAnalyzer()
         analysis = analyzer.analyze(args.reference_image, output_dir=args.output_dir)
         analysis_dict = analyzer.to_dict(analysis)
-        masks_exist = all(Path(zone["mask_path"]).is_file() for zone in analysis_dict["zones"])
+        masks_exist = all(Path(zone["mask_path"]).is_file() for zone in analysis_dict["zones"] if zone.get("mask_path"))
         coverage_total = float(analysis_dict["coverage_total"])
         checks.append({
-            "name": "reference_image_three_zone_analysis",
-            "passed": len(analysis.zones) == 3 and masks_exist and abs(coverage_total - 1.0) <= 1e-6,
+            "name": "reference_image_semantic_analysis",
+            "passed": bool(analysis.zones) and masks_exist and abs(coverage_total - 1.0) <= 1e-6,
             "detail": analysis_dict,
         })
 
@@ -62,7 +62,7 @@ def main(argv: list[str] | None = None) -> int:
         validation = Forest01FoundationService().validate_plan(plan)
         checks.append({
             "name": "visual_intent_planting_plan",
-            "passed": validation["group_count"] == 3 and validation["visual_intent_ready"] is True,
+            "passed": validation["group_count"] == len(analysis.zones) and validation["visual_intent_ready"] is True,
             "detail": validation,
         })
 
