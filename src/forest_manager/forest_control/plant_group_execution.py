@@ -11,7 +11,6 @@ from forest_manager.max_bridge.runtime_bridge import (
     bind_single_forest_diversity_map,
     get_single_forest_area_bounds,
     refresh_single_forest_diversity_map,
-    send_command,
     finalize_plant_group_areas,
     upsert_plant_group_area,
 )
@@ -294,48 +293,24 @@ def _species_color_palette(count: int) -> tuple[tuple[int, int, int], ...]:
 
 
 
-def _get_single_forest_site_polygon(forest_name: str, sample_count: int = 256) -> dict[str, Any]:
-    """Read the active Forest area spline as sampled world-space XY points."""
-    import base64
+def _get_single_forest_site_polygon(
+    forest_name: str,
+    sample_count: int = 256,
+    *,
+    service: ForestPackControlService | None = None,
+) -> dict[str, Any]:
+    """Read the active Forest area polygon through the Forest control service gateway."""
+    svc = service or ForestPackControlService()
+    data = svc.single_forest_area_polygon(
+        forest_name,
+        sample_count=sample_count,
+        preflight=False,
+    )
+    points = data.get("points")
+    if not isinstance(points, list) or len(points) < 3:
+        raise ForestControlError("Forest area polygon returned fewer than three points.")
+    return data
 
-    count = max(64, min(1024, int(sample_count)))
-    encoded_name = base64.b64encode(str(forest_name).encode("utf-8")).decode("ascii")
-    response = send_command(f"FM_SINGLE_FOREST_AREA_POLYGON|{encoded_name}|{count}")
-    if response.get("ok") is not True:
-        raise ForestControlError(f"Could not read Forest area polygon: {response}")
-    data = response.get("data")
-    if not isinstance(data, Mapping):
-        raise ForestControlError("Forest area polygon response is invalid.")
-    points_raw = data.get("points")
-    if not isinstance(points_raw, list) or len(points_raw) < 3:
-        raise ForestControlError("Forest area polygon contains fewer than three points.")
-    points: list[tuple[float, float]] = []
-    for item in points_raw:
-        if not isinstance(item, (list, tuple)) or len(item) < 2:
-            raise ForestControlError("Forest area polygon contains an invalid point.")
-        points.append((float(item[0]), float(item[1])))
-    min_x = float(data.get("min_x_system"))
-    min_y = float(data.get("min_y_system"))
-    max_x = float(data.get("max_x_system"))
-    max_y = float(data.get("max_y_system"))
-    width = max_x - min_x
-    height = max_y - min_y
-    if width <= 0.0 or height <= 0.0:
-        raise ForestControlError("Forest area polygon bounds are invalid.")
-    normalized = [((x - min_x) / width, (y - min_y) / height) for x, y in points]
-    return {
-        "spline_name": str(data.get("spline_name") or ""),
-        "points_world": points,
-        "points_normalized": normalized,
-        "min_x_system": min_x,
-        "min_y_system": min_y,
-        "max_x_system": max_x,
-        "max_y_system": max_y,
-        "width_system": width,
-        "height_system": height,
-        "sample_count": len(points),
-        "verified": data.get("verified") is True,
-    }
 
 def _reference_photo_semantic_layout(
     source_masks: list[Image.Image],
@@ -832,7 +807,7 @@ def refresh_plant_group_diversity_map(manifest: Mapping[str, Any]) -> dict[str, 
     """Interactive UI path: rebuild only the RGB diversity map and rebind it once."""
     forest_name = str(manifest.get("primary_forest") or "FM_Forest_001")
     bounds = get_single_forest_area_bounds(forest_name)
-    site_polygon = _get_single_forest_site_polygon(forest_name)
+    site_polygon = _get_single_forest_site_polygon(forest_name, service=service)
     # Keep the original 75 m mask calibration. current_units_x/y are live
     # Forest Pack map projection values and must never be reinterpreted as
     # Plant Spacing. Using them here creates a feedback loop after every Apply.
@@ -973,86 +948,56 @@ def refresh_plant_group_distribution_fast(
         "verified": bool(collision_results) and all(item.get("verified") for item in collision_results),
     }
 
-def _set_array_bool(forest_name: str, property_name: str, zero_index: int, value: bool) -> dict[str, Any]:
-    def enc(text: str) -> str:
-        return base64.b64encode(text.encode("utf-8")).decode("ascii")
-
-    command = "|".join((
-        "FOREST_CONTROL_SET_ARRAY_SCALAR",
-        enc(forest_name),
-        enc(property_name),
-        str(int(zero_index)),
-        "bool",
-        enc("true" if value else "false"),
-    ))
-    response = send_command(command)
-    if not response.get("ok"):
-        raise ForestControlError(f"Forest Area activation write failed: {property_name}[{zero_index}] {response}")
-    data = response.get("data") or {}
-    if data.get("verified") is not True or bool(data.get("after_value")) is not bool(value):
-        raise ForestControlError(f"Forest Area activation verification failed: {property_name}[{zero_index}]")
-    return data
+def _set_array_bool(
+    forest_name: str,
+    property_name: str,
+    zero_index: int,
+    value: bool,
+    *,
+    service: ForestPackControlService,
+) -> dict[str, Any]:
+    return service.set_array_element(
+        forest_name,
+        property_name,
+        int(zero_index),
+        bool(value),
+        preflight=False,
+    )
 
 
-def _set_array_int(forest_name: str, property_name: str, zero_index: int, value: int) -> dict[str, Any]:
-    def enc(text: str) -> str:
-        return base64.b64encode(text.encode("utf-8")).decode("ascii")
-
-    command = "|".join((
-        "FOREST_CONTROL_SET_ARRAY_SCALAR",
-        enc(forest_name),
-        enc(property_name),
-        str(int(zero_index)),
-        "int",
-        enc(str(int(value))),
-    ))
-    response = send_command(command)
-    if not response.get("ok"):
-        raise ForestControlError(
-            f"Forest Area normalization write failed: {property_name}[{zero_index}]={value} {response}"
-        )
-    data = response.get("data") or {}
-    try:
-        actual = int(data.get("after_value"))
-    except (TypeError, ValueError):
-        actual = None
-    if data.get("verified") is not True or actual != int(value):
-        raise ForestControlError(
-            f"Forest Area normalization verification failed: {property_name}[{zero_index}] "
-            f"expected={value} actual={data.get('after_value')}"
-        )
-    return data
+def _set_array_int(
+    forest_name: str,
+    property_name: str,
+    zero_index: int,
+    value: int,
+    *,
+    service: ForestPackControlService,
+) -> dict[str, Any]:
+    return service.set_array_element(
+        forest_name,
+        property_name,
+        int(zero_index),
+        int(value),
+        preflight=False,
+    )
 
 
-def _set_array_float(forest_name: str, property_name: str, zero_index: int, value: float) -> dict[str, Any]:
-    def enc(text: str) -> str:
-        return base64.b64encode(text.encode("utf-8")).decode("ascii")
+def _set_array_float(
+    forest_name: str,
+    property_name: str,
+    zero_index: int,
+    value: float,
+    *,
+    service: ForestPackControlService,
+) -> dict[str, Any]:
+    return service.set_array_element(
+        forest_name,
+        property_name,
+        int(zero_index),
+        float(value),
+        preflight=False,
+    )
 
-    expected = float(value)
-    command = "|".join((
-        "FOREST_CONTROL_SET_ARRAY_SCALAR",
-        enc(forest_name),
-        enc(property_name),
-        str(int(zero_index)),
-        "float",
-        enc(repr(expected)),
-    ))
-    response = send_command(command)
-    if not response.get("ok"):
-        raise ForestControlError(
-            f"Forest Area normalization write failed: {property_name}[{zero_index}]={expected} {response}"
-        )
-    data = response.get("data") or {}
-    try:
-        actual = float(data.get("after_value"))
-    except (TypeError, ValueError):
-        actual = None
-    if data.get("verified") is not True or actual is None or abs(actual - expected) > 1e-6:
-        raise ForestControlError(
-            f"Forest Area normalization verification failed: {property_name}[{zero_index}] "
-            f"expected={expected} actual={data.get('after_value')}"
-        )
-    return data
 
 
 def _normalize_requested_spline_areas(
@@ -1071,9 +1016,9 @@ def _normalize_requested_spline_areas(
 
     records: list[dict[str, Any]] = []
     for zero_index in requested:
-        area_type = _set_array_int(forest_name, "artypelist", zero_index, 0)
-        include_mode = _set_array_int(forest_name, "arincexclist", zero_index, 0)
-        obstacle_scale = _set_array_float(forest_name, "arobscalelist", zero_index, 100.0)
+        area_type = _set_array_int(forest_name, "artypelist", zero_index, 0, service=service)
+        include_mode = _set_array_int(forest_name, "arincexclist", zero_index, 0, service=service)
+        obstacle_scale = _set_array_float(forest_name, "arobscalelist", zero_index, 100.0, service=service)
         records.append({
             "zero_index": zero_index,
             "area_type": int(area_type.get("after_value")),
@@ -1195,14 +1140,12 @@ def execute_plant_group_manifest(
         "reason": "map_pipeline_deferred",
         "verified": True,
     }
-    encoded_forest = base64.b64encode(forest_name.encode("utf-8")).decode("ascii")
-    encoded_property = base64.b64encode(b"distmap").decode("ascii")
-    clear_response = send_command(
-        f"FOREST_CONTROL_SET_TEXTURE_REF|{encoded_forest}|{encoded_property}|null|WA=="
+    clear_data = svc.set_property(
+        forest_name,
+        "distmap",
+        None,
+        preflight=False,
     )
-    if clear_response.get("ok") is not True:
-        raise ForestControlError(f"Could not clear Forest distribution map: {clear_response}")
-    clear_data = clear_response.get("data") or {}
     if clear_data.get("verified") is not True or clear_data.get("after_value") is not None:
         raise ForestControlError(f"Forest distribution map clear did not verify: {clear_response}")
 

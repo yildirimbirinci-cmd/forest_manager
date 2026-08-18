@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import base64
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Iterable
 
-from forest_manager.max_bridge.runtime_bridge import send_command
+from forest_manager.forest_control.service import ForestControlError, ForestPackControlService
 from forest_manager.site_model import PlantingGroupIntent, PlantingPlan
 from forest_manager.t2_bridge.catalog import T2AssetCatalog, T2AssetRecord
 
@@ -21,8 +20,6 @@ class Stage8AssetResolutionError(RuntimeError):
     pass
 
 
-def _encode_token(value: str) -> str:
-    return base64.b64encode(str(value).encode("utf-8")).decode("ascii")
 
 
 def _norm(value: str) -> str:
@@ -61,8 +58,14 @@ def _candidate_score(record: T2AssetRecord, requested_name: str, aliases: Iterab
 class Stage8T2AssetResolver:
     """Resolve PlantingPlan species to existing T2 .max assets and merge them into Max."""
 
-    def __init__(self, catalog: T2AssetCatalog | None = None) -> None:
+    def __init__(
+        self,
+        catalog: T2AssetCatalog | None = None,
+        *,
+        control_service: ForestPackControlService | None = None,
+    ) -> None:
         self.catalog = catalog or T2AssetCatalog()
+        self.control_service = control_service or ForestPackControlService()
 
     def _search_terms(self, requested_name: str, semantic_role: str) -> list[str]:
         aliases = list(_ROLE_ALIASES.get(semantic_role, ()))
@@ -106,24 +109,19 @@ class Stage8T2AssetResolver:
             )
         return best
 
-    @staticmethod
-    def _invoke_merge(asset_path: Path, *, append: bool) -> dict[str, Any]:
-        encoded = _encode_token(str(asset_path))
-        command = f"APPEND_T2_ASSET|{encoded}|100.0" if append else f"MERGE_T2_ASSET|{encoded}"
-        response = send_command(command, timeout=30.0)
-        if response.get("ok") is not True:
-            raise Stage8AssetResolutionError(
-                f"{command.split('|', 1)[0]} failed for {asset_path}: {response.get('error') or response}"
+    def _invoke_merge(self, asset_path: Path, *, append: bool) -> dict[str, Any]:
+        try:
+            return self.control_service.merge_t2_asset(
+                str(asset_path),
+                append=append,
+                scale_percent=100.0,
+                timeout=30.0,
+                preflight=False,
             )
-        data = response.get("data") or {}
-        if data.get("verified") is not True:
+        except ForestControlError as exc:
             raise Stage8AssetResolutionError(
-                f"Merged T2 asset did not verify for {asset_path}: {data}"
-            )
-        source_name = str(data.get("source_name") or "").strip()
-        if not source_name:
-            raise Stage8AssetResolutionError(f"Merged T2 asset returned no source_name: {asset_path}")
-        return data
+                f"T2 asset merge failed for {asset_path}: {exc}"
+            ) from exc
 
     def merge_missing_source(
         self,

@@ -1004,6 +1004,65 @@ class ForestPackControlService(ForestControlService):
             )
         return selected_name
 
+    def single_forest_area_polygon(
+        self,
+        forest_name: str,
+        *,
+        sample_count: int = 256,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        forest = str(forest_name).strip()
+        if not forest:
+            raise ForestControlError("Forest name must be non-empty.")
+        if isinstance(sample_count, bool) or not isinstance(sample_count, int):
+            raise ForestControlError("Area polygon sample count must be an integer.")
+        count = max(64, min(1024, sample_count))
+        if preflight:
+            ensure_current_bridge()
+        command = "|".join((
+            "FM_SINGLE_FOREST_AREA_POLYGON",
+            self._token(forest),
+            str(count),
+        ))
+        data = _require_ok(send_command(command), "FM_SINGLE_FOREST_AREA_POLYGON")
+        if str(data.get("forest_name") or "") != forest:
+            raise ForestControlError("Single-Forest area polygon identity mismatch.")
+        if data.get("verified") is not True:
+            raise ForestControlError("Single-Forest area polygon was not verified.")
+        return data
+
+    def merge_t2_asset(
+        self,
+        asset_path: str,
+        *,
+        append: bool,
+        scale_percent: float = 100.0,
+        timeout: float = 30.0,
+        preflight: bool = True,
+    ) -> dict[str, Any]:
+        path = str(asset_path).strip()
+        if not path:
+            raise ForestControlError("T2 asset path must be non-empty.")
+        if isinstance(scale_percent, bool) or not isinstance(scale_percent, (int, float)):
+            raise ForestControlError("T2 asset scale must be numeric.")
+        if preflight:
+            ensure_current_bridge()
+        command = (
+            "APPEND_T2_ASSET|" + self._token(path) + "|" + repr(float(scale_percent))
+            if append
+            else "MERGE_T2_ASSET|" + self._token(path)
+        )
+        data = _require_ok(
+            send_command(command, timeout=float(timeout)),
+            command.split("|", 1)[0],
+        )
+        if data.get("verified") is not True:
+            raise ForestControlError(f"T2 asset merge was not verified: {path}")
+        source_name = str(data.get("source_name") or "").strip()
+        if not source_name:
+            raise ForestControlError(f"T2 asset merge returned no source_name: {path}")
+        return data
+
     def resolve_forest_target(
         self,
         explicit_forest_name: str | None = None,
