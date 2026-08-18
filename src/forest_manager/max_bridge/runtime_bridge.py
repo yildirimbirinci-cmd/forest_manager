@@ -12,12 +12,12 @@ from pathlib import Path
 
 HOST = "127.0.0.1"
 PORT = 49491
-EXPECTED_BRIDGE_VERSION = "0.9.99"
-EXPECTED_BRIDGE_BUILD_ID = "stage8-helper-layer-lifecycle-20260818a"
+EXPECTED_BRIDGE_VERSION = "0.9.105"
+EXPECTED_BRIDGE_BUILD_ID = "stage8-physical-spacing-calibration-20260819a"
 
 AUTO_STARTUP_FILENAME = "ForestManager_AutoBridge.ms"
 RELOAD_BOOTSTRAP_FILENAME = "ForestManager_BridgeBootstrap.ms"
-STAGED_BRIDGE_FILENAME = "ForestManager_Bridge_0_9_99.ms"
+STAGED_BRIDGE_FILENAME = "ForestManager_Bridge_0_9_105.ms"
 DISABLED_STARTUP_SUFFIX = ".fm_disabled"
 
 
@@ -750,4 +750,83 @@ def ensure_stage8_helper_layer(*, preflight: bool = True) -> dict:
     data = response.get("data") or {}
     if data.get("verified") is not True or data.get("layer_name") != "FM_HELPERS" or data.get("hidden") is not True:
         raise RuntimeError("Stage 8 helper layer ensure was not verified.")
+    return data
+
+
+def bind_stage8_vector_region_areas(
+    forest_name: str,
+    source_node_name: str,
+    bindings: list[dict] | tuple[dict, ...],
+    *,
+    density_meters: float = 0.75,
+    preflight: bool = True,
+) -> dict:
+    """Bind FM vector helper splines as Include Areas with per-Area species IDs."""
+    if density_meters <= 0:
+        raise ValueError("Vector Area binding density_meters must be greater than zero.")
+    if preflight:
+        ensure_current_bridge()
+    records: list[str] = []
+    for item in bindings:
+        helper_name = str(item.get("helper_name") or "").strip()
+        species_ids = [int(value) for value in (item.get("species_ids") or []) if int(value) > 0]
+        if not helper_name:
+            raise ValueError("Vector Area binding requires helper_name.")
+        if not species_ids:
+            raise ValueError("Vector Area binding requires at least one species ID per helper.")
+        records.append(helper_name + "~" + ",".join(str(value) for value in species_ids))
+    if not records:
+        raise ValueError("Vector Area binding requires at least one helper binding.")
+    command = "|".join((
+        "FM_STAGE8_VECTOR_AREA_BIND",
+        _encode_token(str(forest_name).strip()),
+        _encode_token(str(source_node_name).strip()),
+        _encode_token(";".join(records)),
+        format(float(density_meters), ".12g"),
+    ))
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Stage 8 vector Area binding failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Stage 8 vector Area binding was not verified.")
+    return data
+
+
+def get_named_spline_world_space(node_name: str, *, samples_per_spline: int = 32, preflight: bool = True) -> dict:
+    """Read one named spline in world space without changing scene selection."""
+    if preflight:
+        ensure_current_bridge()
+    name = str(node_name).strip()
+    if not name:
+        raise ValueError("A spline node name is required.")
+    samples = max(8, min(512, int(samples_per_spline)))
+    command = "FM_STAGE8_GET_NAMED_SPLINE_WORLD_SPACE|" + _encode_token(name) + "|" + str(samples)
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Named spline world-space read failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Named spline world-space read was not verified.")
+    return data
+
+
+def get_geometry_source_world_diagnostic(forest_name: str, species_ids, *, preflight: bool = True) -> dict:
+    """Read world-space transforms and bounds for selected Forest geometry sources."""
+    if preflight:
+        ensure_current_bridge()
+    forest = str(forest_name).strip()
+    if not forest:
+        raise ValueError("A Forest node name is required.")
+    ids = sorted({int(value) for value in species_ids})
+    if not ids or any(value < 1 for value in ids):
+        raise ValueError("At least one positive one-based species ID is required.")
+    csv = ",".join(str(value) for value in ids)
+    command = "FM_STAGE8_GET_GEOMETRY_SOURCE_WORLD_DIAGNOSTIC|" + _encode_token(forest) + "|" + _encode_token(csv)
+    response = send_command(command)
+    if not response.get("ok"):
+        raise RuntimeError("Geometry source world diagnostic failed: " + json.dumps(response, ensure_ascii=False))
+    data = response.get("data") or {}
+    if data.get("verified") is not True:
+        raise RuntimeError("Geometry source world diagnostic was not verified.")
     return data
