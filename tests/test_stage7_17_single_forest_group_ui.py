@@ -53,9 +53,18 @@ def test_manifest_groups_share_single_runtime_forest_and_keep_group_values():
 def test_controller_contains_manifest_scoped_artist_persistence_contract():
     root = Path(__file__).resolve().parents[1]
     controller = (root / "src" / "forest_manager" / "ui" / "controller.py").read_text(encoding="utf-8")
+    scene_state = (root / "src" / "forest_manager" / "forest_control" / "scene_state.py").read_text(encoding="utf-8")
     compile(controller, "controller.py", "exec")
-    assert "write_plant_group_manifest" in controller
+    compile(scene_state, "scene_state.py", "exec")
+
+    # Manifest persistence remains required, but its read/write ownership now
+    # belongs to the authoritative SceneStateGateway rather than the UI controller.
+    assert "SceneStateGateway" in controller
+    assert "self.scene_state" in controller
+    assert "write_plant_group_manifest" not in controller
+    assert "self.service.write_plant_group_manifest(" in scene_state
+
     assert "_persist_group_artist_control" in controller
     assert "group.manifest_backed" in controller
     assert "selected_group_id=group.group_id" in controller
-    assert "target[\"spacing_system\"] = [raw_spacing, raw_spacing]" in controller
+    assert 'target["spacing_system"] = [raw_spacing, raw_spacing]' in controller
