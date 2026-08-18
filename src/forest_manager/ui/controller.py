@@ -252,18 +252,30 @@ class ForestManagerUIController:
         target["reset_defaults"] = defaults
         return defaults
 
+    @staticmethod
+    def _manifest_preserves_authored_spacing(manifest: dict[str, Any]) -> bool:
+        """Return True when authored Plant Group spacing is scene-authoritative.
+
+        Stage 8 reference-image manifests are authored planning data. Runtime
+        Forest Pack collision radii may reflect execution normalization and
+        must not overwrite those authored spacing values during UI refresh.
+        """
+        generated_by = str(manifest.get("generated_by") or "").strip().lower()
+        return generated_by.startswith("stage8-reference-image-")
+
     def _synchronize_group_manifest_from_scene(self, manifest: dict[str, Any]) -> tuple[dict[str, Any], bool]:
         """Merge live Forest runtime state into the scene-persisted semantic manifest.
 
-        The 3ds Max scene is authoritative for runtime-editable state.  In
-        particular, per-species spacing is reconstructed from each Geometry
-        item's Collision Radius so closing/reopening Forest Manager does not
-        silently restore stale manifest values.
+        Legacy manifests may reconstruct per-species spacing from live Forest
+        Pack Collision Radius for compatibility. Stage 8 reference-image
+        manifests keep authored spacing authoritative and never allow refresh
+        readback to overwrite it.
         """
         raw_groups = manifest.get("groups") if isinstance(manifest, dict) else None
         if not isinstance(raw_groups, list):
             return manifest, False
         changed = False
+        preserve_authored_spacing = self._manifest_preserves_authored_spacing(manifest)
         groups_by_id = {group.group_id: group for group in self._state.plant_groups if group.manifest_backed}
         for target in raw_groups:
             if not isinstance(target, dict):
@@ -294,38 +306,39 @@ class ForestManagerUIController:
                 # live ForestPack Geometry Collision Radius.  The reset
                 # baseline is persisted in the Max scene manifest; radius=100
                 # means exactly that authored baseline.
-                defaults = self._canonical_group_reset_defaults(target)
-                reset_pair = defaults.get("spacing_system") if isinstance(defaults, dict) else None
-                if isinstance(reset_pair, (list, tuple)) and reset_pair:
-                    baseline = float(reset_pair[0])
-                    radii: list[float] = []
-                    for index in indices:
-                        radius = float(
-                            self.service.get_array_element(
-                                group.forest_name, "radiuslist", index, preflight=False
-                            ).get("value")
-                            or 100.0
-                        )
-                        if radius > 0.0:
-                            radii.append(radius)
-                    if radii and baseline > 0.0:
-                        live_spacing = baseline * (sum(radii) / len(radii)) / 100.0
-                        current_pair = target.get("spacing_system")
-                        current_spacing = (
-                            float(current_pair[0])
-                            if isinstance(current_pair, (list, tuple)) and current_pair
-                            else None
-                        )
-                        if current_spacing is None or abs(current_spacing - live_spacing) > 1e-6:
-                            target["spacing_system"] = [float(live_spacing), float(live_spacing)]
-                            try:
-                                display_spacing, _ = self._system_distance_to_display(
-                                    float(live_spacing), self._state.scene_units
-                                )
-                                artist_values["density_spacing"] = float(display_spacing)
-                            except Exception:
-                                artist_values.pop("density_spacing", None)
-                            changed = True
+                if not preserve_authored_spacing:
+                    defaults = self._canonical_group_reset_defaults(target)
+                    reset_pair = defaults.get("spacing_system") if isinstance(defaults, dict) else None
+                    if isinstance(reset_pair, (list, tuple)) and reset_pair:
+                        baseline = float(reset_pair[0])
+                        radii: list[float] = []
+                        for index in indices:
+                            radius = float(
+                                self.service.get_array_element(
+                                    group.forest_name, "radiuslist", index, preflight=False
+                                ).get("value")
+                                or 100.0
+                            )
+                            if radius > 0.0:
+                                radii.append(radius)
+                        if radii and baseline > 0.0:
+                            live_spacing = baseline * (sum(radii) / len(radii)) / 100.0
+                            current_pair = target.get("spacing_system")
+                            current_spacing = (
+                                float(current_pair[0])
+                                if isinstance(current_pair, (list, tuple)) and current_pair
+                                else None
+                            )
+                            if current_spacing is None or abs(current_spacing - live_spacing) > 1e-6:
+                                target["spacing_system"] = [float(live_spacing), float(live_spacing)]
+                                try:
+                                    display_spacing, _ = self._system_distance_to_display(
+                                        float(live_spacing), self._state.scene_units
+                                    )
+                                    artist_values["density_spacing"] = float(display_spacing)
+                                except Exception:
+                                    artist_values.pop("density_spacing", None)
+                                changed = True
             except Exception:
                 pass
         return manifest, changed

@@ -57,7 +57,7 @@ class PlantingPlanBuilder:
                     order=order,
                     semantic_role=zone.semantic_role,
                     coverage_weight=float(zone.coverage_weight),
-                    source_names=tuple(source_names.get(zone.semantic_role) or ()),
+                    source_names=tuple(source_names.get(zone.semantic_role) or zone.source_names or ()),
                     naturalness=zone.naturalness,
                     cluster_character=zone.cluster_character,
                     zone_mask_path=zone.mask_path,

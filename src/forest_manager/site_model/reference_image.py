@@ -16,7 +16,8 @@ class ReferenceZoneIntent:
     naturalness: str
     cluster_character: str
     confidence: float
-    mask_path: str
+    mask_path: str | None = None
+    source_names: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -46,6 +47,80 @@ class ReferenceImageAnalyzer:
         ("mid_accent", "Mid Accent"),
         ("structural_shrub", "Structural Shrub"),
     )
+
+    def from_group_intents(
+        self,
+        image_path: str,
+        group_intents: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    ) -> ReferenceImageAnalysis:
+        """Build variable-count semantic analysis from externally inferred AI group intents.
+
+        This path carries semantic/species intent only. It deliberately does not
+        project image masks into scene space; mask_path remains optional while
+        the official map-free runtime is active.
+        """
+        path = Path(image_path).expanduser().resolve()
+        if not path.is_file():
+            raise FileNotFoundError(f"Reference image does not exist: {path}")
+        if not group_intents:
+            raise ValueError("AI group-intent analysis must contain at least one Plant Group.")
+
+        image = Image.open(path)
+        width, height = image.size
+        zones: list[ReferenceZoneIntent] = []
+        raw_weights: list[float] = []
+        for index, item in enumerate(group_intents, start=1):
+            if not isinstance(item, dict):
+                raise TypeError(f"AI group intent #{index} must be a dictionary.")
+            role = str(item.get("semantic_role") or "").strip()
+            if not role:
+                raise ValueError(f"AI group intent #{index} has no semantic_role.")
+            label = str(item.get("label") or role.replace("_", " ").title()).strip()
+            weight = float(item.get("coverage_weight") or 0.0)
+            if weight < 0.0:
+                raise ValueError(f"AI group intent '{role}' has a negative coverage_weight.")
+            raw_weights.append(weight)
+            sources = item.get("source_names") or ()
+            if isinstance(sources, str):
+                sources = (sources,)
+            else:
+                sources = tuple(str(value).strip() for value in sources if str(value).strip())
+            zones.append(
+                ReferenceZoneIntent(
+                    semantic_role=role,
+                    label=label,
+                    coverage_weight=weight,
+                    naturalness=str(item.get("naturalness") or "Balanced"),
+                    cluster_character=str(item.get("cluster_character") or "Medium Clusters"),
+                    confidence=float(item.get("confidence") or item.get("visual_confidence") or 0.0),
+                    mask_path=None if not item.get("mask_path") else str(item.get("mask_path")),
+                    source_names=tuple(sources),
+                )
+            )
+
+        total = sum(raw_weights)
+        if total <= 0.0:
+            raise ValueError("AI group-intent coverage weights must sum to more than zero.")
+        normalized = tuple(
+            ReferenceZoneIntent(
+                semantic_role=zone.semantic_role,
+                label=zone.label,
+                coverage_weight=float(zone.coverage_weight / total),
+                naturalness=zone.naturalness,
+                cluster_character=zone.cluster_character,
+                confidence=zone.confidence,
+                mask_path=zone.mask_path,
+                source_names=zone.source_names,
+            )
+            for zone in zones
+        )
+        return ReferenceImageAnalysis(
+            image_path=str(path),
+            width=int(width),
+            height=int(height),
+            zones=normalized,
+            analysis_version="stage8-reference-image-variable-groups-v2",
+        )
 
     def analyze(self, image_path: str, *, output_dir: str | None = None) -> ReferenceImageAnalysis:
         path = Path(image_path).expanduser().resolve()
@@ -138,6 +213,7 @@ class ReferenceImageAnalyzer:
                 cluster_character=zone.cluster_character,
                 confidence=zone.confidence,
                 mask_path=zone.mask_path,
+                source_names=zone.source_names,
             )
             for zone in zones
         ]
@@ -191,6 +267,7 @@ class ReferenceImageAnalyzer:
                     "cluster_character": zone.cluster_character,
                     "confidence": zone.confidence,
                     "mask_path": zone.mask_path,
+                    "source_names": list(zone.source_names),
                 }
                 for zone in analysis.zones
             ],

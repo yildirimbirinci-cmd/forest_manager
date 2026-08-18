@@ -65,3 +65,102 @@ def test_restart_contract_keeps_pending_state_non_persistent():
     assert "self._pending.clear()" in text
     assert "pending_edits=()" in text
     assert "self._group_runtime_cache.clear()" in text
+
+def test_stage8_reference_image_manifest_preserves_authored_spacing_during_sync():
+    controller = ForestManagerUIController.__new__(ForestManagerUIController)
+    controller._state = type(
+        "_State",
+        (),
+        {
+            "plant_groups": (
+                _group("plant_group:1:foreground_mass", 7500.0),
+            ),
+            "scene_units": {
+                "display_unit": "meters",
+                "one_meter_system_units": 100.0,
+                "one_centimeter_system_units": 1.0,
+                "one_millimeter_system_units": 0.1,
+            },
+        },
+    )()
+
+    class _Service:
+        def get_array_element(self, forest_name, property_name, index, preflight=False):
+            if property_name == "geomlist":
+                return {"value": 1}
+            if property_name == "radiuslist":
+                return {"value": 7.4764}
+            raise AssertionError(property_name)
+
+    controller.service = _Service()
+    controller._group_geometry_indices = lambda group: [0]
+    controller._canonical_group_reset_defaults = lambda target: {
+        "spacing_system": [7500.0, 7500.0]
+    }
+
+    manifest = {
+        "primary_forest": "FM_Forest_001",
+        "generated_by": "stage8-reference-image-variable-groups-v2",
+        "groups": [{
+            "group_id": "plant_group:1:foreground_mass",
+            "source_names": ["Lavender"],
+            "spacing_system": [7500.0, 7500.0],
+            "artist_values": {},
+            "reset_defaults": {"spacing_system": [7500.0, 7500.0]},
+        }],
+    }
+
+    synchronized, changed = controller._synchronize_group_manifest_from_scene(manifest)
+
+    assert synchronized["groups"][0]["spacing_system"] == [7500.0, 7500.0]
+    assert "density_spacing" not in synchronized["groups"][0]["artist_values"]
+    assert changed is True  # species_enabled is still synchronized from live runtime
+
+
+def test_legacy_manifest_keeps_collision_radius_spacing_compatibility():
+    controller = ForestManagerUIController.__new__(ForestManagerUIController)
+    controller._state = type(
+        "_State",
+        (),
+        {
+            "plant_groups": (
+                _group("legacy", 7500.0),
+            ),
+            "scene_units": {
+                "display_unit": "meters",
+                "one_meter_system_units": 100.0,
+                "one_centimeter_system_units": 1.0,
+                "one_millimeter_system_units": 0.1,
+            },
+        },
+    )()
+
+    class _Service:
+        def get_array_element(self, forest_name, property_name, index, preflight=False):
+            if property_name == "geomlist":
+                return {"value": 1}
+            if property_name == "radiuslist":
+                return {"value": 50.0}
+            raise AssertionError(property_name)
+
+    controller.service = _Service()
+    controller._group_geometry_indices = lambda group: [0]
+    controller._canonical_group_reset_defaults = lambda target: {
+        "spacing_system": [7500.0, 7500.0]
+    }
+
+    manifest = {
+        "primary_forest": "FM_Forest_001",
+        "groups": [{
+            "group_id": "legacy",
+            "source_names": ["Lavender"],
+            "spacing_system": [7500.0, 7500.0],
+            "artist_values": {},
+            "reset_defaults": {"spacing_system": [7500.0, 7500.0]},
+        }],
+    }
+
+    synchronized, changed = controller._synchronize_group_manifest_from_scene(manifest)
+
+    assert changed is True
+    assert synchronized["groups"][0]["spacing_system"] == [3750.0, 3750.0]
